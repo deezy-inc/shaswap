@@ -12,8 +12,8 @@
   "type": "module",
   "private": true,
   "dependencies": {
-    "@qbit-swap/client": "file:../qbit-otc/swaplib/js",
-    "@noble/hashes": "^1.7.1"
+    "@noble/hashes": "^1.7.1",
+    "@qbit-swap/client": "file:../qbit-otc/swaplib/js"
   },
   "exports": {
     ".": "./maker-bot.js"

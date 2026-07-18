@@ -40,6 +40,7 @@ export class MakerBot {
     this.pollMs = pollMs;
     this.feeSats = feeSats;
     this.log = log;
+    this.offers = new Map();   // offerId -> { makerToken, lot, handling }
   }
 
   async #api(path, { token, method = "GET", body } = {}) {
@@ -70,6 +71,38 @@ export class MakerBot {
     if (terms.qbtSats > this.policy.maxQbtSats) return { accept: false, rate, reason: `qbt ${terms.qbtSats} > cap ${this.policy.maxQbtSats}` };
     if (rate < this.policy.minRate) return { accept: false, rate, reason: `rate ${rate.toFixed(6)} < floor ${this.policy.minRate}` };
     return { accept: true, rate, reason: "within policy" };
+  }
+
+  // ── order book: post asks at several lot sizes and fulfill any that get taken ──
+  async postAsk({ qbtSats, btcSats }) {
+    const o = await this.#api("/offers", { method: "POST", body: { giveCoin: "QBT", giveSats: qbtSats, wantCoin: "BTC", wantSats: btcSats } });
+    this.offers.set(o.id, { makerToken: o.makerToken, lot: { qbtSats, btcSats }, handling: false });
+    this.log(`[maker] posted ask ${o.id.slice(0, 8)}: ${qbtSats / 1e8} QBT @ ${(btcSats / qbtSats).toFixed(4)} BTC/QBT`);
+    return o.id;
+  }
+  async #offerView(id, makerToken) {
+    const r = await fetch(`${this.base}/offers/${id}?makerToken=${makerToken}`);
+    const j = await r.json(); if (!r.ok) throw new Error(j.error || r.status); return j;
+  }
+  // Post `lots` [{qbtSats, btcSats}] as asks and keep the book replenished; fulfill takes as they come.
+  async makeMarket({ lots }) {
+    for (const lot of lots) await this.postAsk(lot);
+    this.log(`[maker] market up: ${lots.length} asks`);
+    for (;;) {
+      for (const [id, o] of [...this.offers]) {
+        try {
+          const mv = await this.#offerView(id, o.makerToken);
+          if (mv.status === "taken" && mv.take && !o.handling) {
+            o.handling = true;
+            this.log(`[maker] ask ${id.slice(0, 8)} taken -> fulfilling swap ${mv.take.swapId.slice(0, 8)}`);
+            this.fulfill({ id: mv.take.swapId, token: mv.take.makerSwapToken }).catch((e) => this.log(`[maker] fulfill error: ${e.message}`));
+            this.offers.delete(id);
+            await this.postAsk(o.lot);   // replenish the book with a fresh ask of the same lot
+          }
+        } catch { /* transient */ }
+      }
+      await sleep(this.pollMs);
+    }
   }
 
   // Consider one swap link { swapId, token }. Prices it, and if profitable runs the maker side to

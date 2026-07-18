@@ -20,3 +20,21 @@ management, and running many swaps concurrently — signing everything client-si
 ## Dev
 Depends on the public client library. For local dev it references it directly; in production it
 consumes the published `@qbit-swap/client` package and points at a coordinator URL.
+
+## Order-book market making
+
+`MakerBot.makeMarket({ lots })` posts a batch of QBT-for-BTC **asks** (one per lot size) to the
+coordinator's public order book and fulfills any that get taken, replenishing each lot afterward:
+
+```js
+const bot = new MakerBot({ coordinatorUrl, wallet, policy });
+await bot.makeMarket({ lots: [
+  { qbtSats: 100_000_000,  btcSats: 20_000_000 },   // 1 QBT @ 0.20 BTC/QBT
+  { qbtSats: 500_000_000,  btcSats: 100_000_000 },  // 5 QBT @ 0.20
+  { qbtSats: 2_500_000_000, btcSats: 500_000_000 }, // 25 QBT @ 0.20
+] });
+```
+
+Takers see these on the web app's order book and click to buy. When one is taken, the bot enters the
+instantiated swap as the participant, funds its QBT leg (via the injected `wallet`) only after the
+taker's BTC HTLC is on-chain, and claims the BTC — non-custodial, keys never leave the bot.
