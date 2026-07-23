@@ -14,11 +14,47 @@ management, and running many swaps concurrently — signing everything client-si
 never hands keys to anyone, and it can only ever recover its own funds.
 
 ## Layout
-- `maker-bot.js` — a single-party autonomous maker. Given a swap it decides to take, it joins as the
-  counterparty (Bob: holds QBT, wants BTC), funds its leg only after the taker's BTC is on-chain, and
-  claims the BTC on reveal (or refunds its QBT on timeout).
+- `maker-bot.js` — the autonomous maker: prices swaps, joins as the right role, funds its leg, and
+  claims (or refunds) — signing every HTLC tx in-process with throwaway per-swap keys.
+- `wallets.js` — the **wallet adapter**: the only thing that touches your coins (see below).
+- `run.js` — reference runner: connect wallets + stream a two-sided quote. `node run.js`.
 - `test/e2e.mock.mjs` + `test/mockchain.mjs` — end-to-end tests: the **real coordinator + real bot over
   the real HTTP API**, with an in-memory chain standing in for regtest nodes.
+
+## Connecting your wallets
+The bot is wallet-agnostic and **never holds a key or a seed**. It reaches your coins only through an
+injected `wallet` adapter — six methods — and signs every HTLC claim/refund itself with ephemeral,
+per-swap keys. So your wallet's job is small: hand out fresh addresses, report chain height, and send to
+an HTLC address. Claimed funds land back at addresses your wallet owns.
+
+```js
+// The interface the bot expects:
+//   btcHeight() / qbitHeight()  -> Promise<number>            current tip (funding/refund gates)
+//   newBtc()    / newQbit()     -> Promise<{address, spk}>    fresh receive/refund address + its scriptPubKey
+//   fundBtc(address, sats) / fundQbit(address, sats) -> Promise<txid>   send exactly `sats` to an HTLC
+```
+
+`wallets.js` implements this against standard Bitcoin-Core-style JSON-RPC (qbitd speaks the same wallet
+RPC), calling only `getblockcount`, `getnewaddress`, `getaddressinfo`, `sendtoaddress`:
+
+```js
+import { MakerBot } from "./maker-bot.js";
+import { rpcWallet, walletAdapter } from "./wallets.js";
+
+const wallet = walletAdapter({
+  btc:  rpcWallet("http://user:pass@btc-node:8332",  "maker"),   // your bitcoind + a funded wallet named "maker"
+  qbit: rpcWallet("http://user:pass@qbit-node:PORT", "maker"),   // your qbitd + a funded wallet
+});
+new MakerBot({ coordinatorUrl, wallet, policy, makerKey }).serveRfq({ quote });
+```
+
+Point it at **your own** bitcoind + qbitd — they only need to be on the same network as the coordinator's
+nodes, not the same machines. Run each with a funded wallet, keep the RPC private to the bot's host, and
+use a dedicated RPC user. Nothing else is needed: the bot exports no keys and the wallet signs no HTLCs.
+`run.js` wires all of this from env (`BTC_RPC_URL`, `QBIT_RPC_URL`, `MAKER_KEY`, `COORDINATOR_URL`, …).
+
+Any wallet works, not just Core — implement the same six methods against a different backend (an HD
+signer + Esplora, a custody API, hardware) and pass that object as `wallet`.
 
 ## Dev / running the tests
 Depends on the public client library and, for the e2e, the coordinator — both from a `qbit-otc`

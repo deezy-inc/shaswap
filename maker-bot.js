@@ -97,8 +97,12 @@ export class MakerBot {
     if (!r.ok) throw new Error(`/rfq/maker: ${j.error || r.status}`);
     return j;   // { ok, ttlMs, quote, matches:[{swapId, token, role, side, price, btcSats, qbtSats}] }
   }
-  // quote: { ask?: {price, qbtSats}, bid?: {price, qbtSats} } — price is BTC per QBT. Ask-only recommended.
-  async serveRfq({ quote, pingMs = 3000 }) {
+  // quote: { ask?: {price, qbtSats}, bid?: {price, qbtSats} } — price is BTC per QBT.
+  // pingMs: the ping only has to land inside the coordinator's quote TTL (RFQ_TTL_MS, default 30s), so
+  // ~10s keeps the quote live with a dropped-ping cushion. It ALSO bounds how stale your quoted price can
+  // be (a taker fills at your last-pinged price), so ping as often as you want to move price — every few
+  // seconds if you're tracking the market, 10–15s if your price is steady. (Not 200ms; that's test speed.)
+  async serveRfq({ quote, pingMs = 10000 }) {
     if (!this.makerKey) throw new Error("serveRfq needs a makerKey (the coordinator's RFQ_MAKER_KEYS value)");
     this.log(`[maker] RFQ market up: ${JSON.stringify(quote)} (ping ${pingMs}ms)`);
     for (;;) {
