@@ -7,7 +7,7 @@
 import { randomBytes } from "node:crypto";
 import { bytesToHex as hex, hexToBytes as bin } from "@noble/hashes/utils.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { slhDsaKeygen, slhDsaSign, compressedPub, p2mrSighash, serializeTx, P2MR_CONTROL_SINGLE_LEAF, addressToScriptPubKey } from "../../qbit-otc/client/index.js";
+import { slhDsaKeygen, slhDsaSign, compressedPub, p2mrSighash, serializeTx, P2MR_CONTROL_SINGLE_LEAF, addressToScriptPubKey, btcSpend } from "../../qbit-otc/client/index.js";
 import { MakerBot } from "../maker-bot.js";
 import { installMocks } from "./mockchain.mjs";
 
@@ -17,6 +17,7 @@ process.env.COORD_CHAIN = "dev";
 process.env.BTC_BLOCK_SECS = "1"; process.env.QBIT_BLOCK_SECS = "1";
 process.env.HTLC_TO_SECS = "60"; process.env.HTLC_FROM_SECS = "120";
 process.env.DEV_CONFS_CAP = "2"; process.env.FUNDING_WINDOW_MS = "600000";
+process.env.RATE_MAX = "100000";   // the coordinator's per-IP POST rate limit isn't under test here (a real maker pings every few seconds, within the quote TTL — not 5×/s like this fast harness)
 process.env.FEE_BPS = "200";
 process.env.FEE_XPUB = "xpub6BgBgsespWvERF3LHQu6CnqdvfEvtMcQjYrcRzx53QJjSxarj2afYWcLteoGVky7D3UKDP9QyrLprQ3VCECoY49yfdDEHGCtMMj92pReUsQ";
 process.env.RFQ_MAKER_KEYS = "mm-test:makerkey123";
@@ -36,9 +37,11 @@ let ok = true; const ck = (c, m) => { console.log((c ? "[ok] " : "[FAIL] ") + m)
 // A wallet adapter for the bot backed by the mock QBT chain (funds by address; dest spks are throwaway).
 const wallet = {
   qbitHeight: async () => mock.qbit.height,
+  btcHeight: async () => mock.btc.height,
   newQbit: async () => ({ address: `qdest-${hex(randomBytes(4))}`, spk: randomBytes(22) }),
   newBtc: async () => ({ address: `bdest-${hex(randomBytes(4))}`, spk: randomBytes(22) }),
   fundQbit: async (address, sats) => mock.qbit.fundAddr(address, sats),
+  fundBtc: async (address, sats) => mock.btc.fundAddr(address, sats),
 };
 const policy = { minRate: 0.1, maxQbtSats: 10_000_000_000 };   // floor 0.1 BTC/QBT; cap 100 QBT
 
@@ -120,16 +123,16 @@ async function main() {
     ck(!final.self, "bot never joined the underpriced swap (its own party slot is empty)");
   }
 
-  // ── 4) RFQ ask side: bot streams a quote, retail takes it via /rfq, swap → COMPLETE ────────
-  console.log("\n=== scenario 4: RFQ maker quote → retail one-click buy → COMPLETE ===");
+  // The bot serves a live TWO-SIDED quote for the rest of the run (ask = it sells QBT, bid = it buys QBT).
+  const ASK = 0.2, BID = 0.18;
+  bot.serveRfq({ quote: { ask: { price: ASK, qbtSats: 5_000_000_000 }, bid: { price: BID, qbtSats: 5_000_000_000 } }, pingMs: 200 }).catch((e) => console.log("serveRfq:", e.message));
+  await until(async () => { const d = await api("/rfq"); return d.buy?.qbtSats > 0 && d.sell?.qbtSats > 0 ? d : null; });   // both sides live
+
+  // ── 4) RFQ ask side: retail one-click BUYS QBT, bot fulfills as Bob → COMPLETE ────────────
+  console.log("\n=== scenario 4: RFQ ask → retail one-click buy → COMPLETE ===");
   {
-    const ASK = 0.2;
-    bot.serveRfq({ quote: { ask: { price: ASK, qbtSats: 5_000_000_000 } }, pingMs: 200 }).catch((e) => console.log("serveRfq:", e.message));
-    // wait for the maker's first ping to register the quote, then retail takes the best price in one click
-    await until(async () => { const d = await api("/rfq"); return d.buy?.qbtSats > 0 ? d : null; });
     const take = await api("/rfq/take", { method: "POST", body: { side: "buy", qbtSats: 100_000_000, price: ASK } });   // { swapId, token(alice), role }
     ck(take.role === "alice" && take.swapId, `retail took an RFQ buy quote (role ${take.role})`);
-    // retail (alice) joins with H; the bot's next ping delivers the match and it fulfills as bob
     const alice = await makeAlice();
     const tokens = { alice: take.token };
     await api(`/swaps/${take.swapId}/party`, { token: take.token, method: "POST", body: { qbitPub: hex(alice.kp.pk), btcPub: hex(alice.btcPub), btcDest: "bc1alice", qbitDest: "qbt1alice", H: hex(alice.H) } });
@@ -138,10 +141,49 @@ async function main() {
     mock.qbit.mine(2);
     await aliceClaimQbt(take.swapId, tokens, alice);
     const final = await until(async () => { const s = await api(`/swaps/${take.swapId}`, { token: take.token }); return s.state === "COMPLETE" ? s : null; });
-    ck(final.state === "COMPLETE", `RFQ-sourced swap settled COMPLETE (${final.state})`);
+    ck(final.state === "COMPLETE", `RFQ ask-side swap settled COMPLETE (${final.state})`);
   }
 
-  console.log(ok ? "\nPASS — MakerBot drives complete + refund + reject + RFQ against the live coordinator API" : "\nFAIL");
+  // ── 5) RFQ bid side: retail one-click SELLS QBT, bot fulfills as ALICE → COMPLETE ─────────
+  // Here the bot is the initiator: it funds BTC first, then claims the QBT retail deposits — revealing
+  // the preimage — after which retail (played here) claims the BTC. Exercises fulfillAsAlice end to end.
+  console.log("\n=== scenario 5: RFQ bid → retail one-click sell → bot fulfills as Alice → COMPLETE ===");
+  {
+    const take = await api("/rfq/take", { method: "POST", body: { side: "sell", qbtSats: 100_000_000, price: BID } });   // retail = the taker (bob)
+    ck(take.role === "bob" && take.swapId, `retail took an RFQ sell quote (role ${take.role})`);
+    const id = take.swapId, bobTok = take.token;
+    const bobPriv = randomBytes(32), bobBtcSpk = randomBytes(22);
+    // retail (bob) joins as the QBT seller (no H — the bot/Alice owns the secret)
+    await api(`/swaps/${id}/party`, { token: bobTok, method: "POST", body: { qbitPub: hex((await slhDsaKeygen(randomBytes(128))).pk), btcPub: hex(compressedPub(bobPriv)), btcDest: "bc1bob", qbitDest: "qbt1bob" } });
+    // the bot (Alice) funds BTC first; once it buries, retail funds QBT
+    const v1 = await until(async () => { const s = await api(`/swaps/${id}`, { token: bobTok }); return s.funding?.btc ? s : null; });
+    ck(v1.funding.btc.amountSats === v1.terms.btcSats + (v1.fee?.sats || 0), "bot funded BTC incl. the coordinator fee (buyer bears it on-chain; taker-pays nets it back on claim)");
+    mock.btc.mine(2);
+    const cleared = await until(async () => { const s = await api(`/swaps/${id}`, { token: bobTok }); return s.fundGate?.cleared ? s : null; });
+    mock.qbit.fundSpk(cleared.htlc.qbit.spk, cleared.terms.qbtSats); mock.qbit.mine(2);   // retail funds QBT (spk is hex)
+    // the bot claims the QBT (revealing the preimage); then retail claims the BTC → COMPLETE
+    const revealed = await until(async () => { const s = await api(`/swaps/${id}`, { token: bobTok }); return s.preimage ? s : null; });
+    ck(!!revealed.preimage, "bot (Alice) claimed QBT and revealed the preimage");
+    const f = revealed.funding.btc, ws = bin(revealed.htlc.btc.witnessScript);
+    const btx = btcSpend({ prevTxidLE: bin(f.txid).reverse(), vout: f.vout, amount: f.amountSats, ws, priv: bobPriv, destSpk: bobBtcSpk, outVal: f.amountSats - 5000, branch: "claim", preimage: bin(revealed.preimage) });
+    await api(`/swaps/${id}/broadcast`, { token: bobTok, method: "POST", body: { leg: "btc", kind: "claim", tx: hex(btx) } }); mock.btc.mine(1);
+    const final = await until(async () => { const s = await api(`/swaps/${id}`, { token: bobTok }); return s.state === "COMPLETE" ? s : null; });
+    ck(final.state === "COMPLETE", `RFQ bid-side swap settled COMPLETE (${final.state})`);
+  }
+
+  // ── 6) RFQ bid side, taker walks: bot funds BTC, retail never funds QBT → bot REFUNDS its BTC ──
+  console.log("\n=== scenario 6: RFQ bid, taker abandons → bot refunds its BTC → REFUNDED ===");
+  {
+    const take = await api("/rfq/take", { method: "POST", body: { side: "sell", qbtSats: 100_000_000, price: BID } });
+    const id = take.swapId, bobTok = take.token;
+    await api(`/swaps/${id}/party`, { token: bobTok, method: "POST", body: { qbitPub: hex((await slhDsaKeygen(randomBytes(128))).pk), btcPub: hex(compressedPub(randomBytes(32))), btcDest: "bc1bob", qbitDest: "qbt1bob" } });
+    const v = await until(async () => { const s = await api(`/swaps/${id}`, { token: bobTok }); return s.funding?.btc ? s : null; });   // bot funded BTC
+    mock.btc.mine((v.locktimes.btc - mock.btc.height) + 1);   // taker never funds QBT; advance past the BTC timelock
+    const final = await until(async () => { const s = await api(`/swaps/${id}`, { token: bobTok }); return s.state === "REFUNDED" ? s : null; });
+    ck(final.state === "REFUNDED", `bot reclaimed its BTC → REFUNDED (${final.state})`);
+  }
+
+  console.log(ok ? "\nPASS — MakerBot: buy + sell (Bob & Alice roles) + refunds + reject, all against the live API" : "\nFAIL");
   process.exit(ok ? 0 : 1);
 }
 main().catch((e) => { console.error("ERROR:", e.stack || e.message); process.exit(1); });

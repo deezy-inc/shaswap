@@ -5,7 +5,7 @@
 // coordinator can extract the revealed preimage from a claim's witness). Not a validator — testAccept
 // always allows; tx VALIDITY is covered by the client library's own e2e. What this proves is the
 // bot↔coordinator protocol: pricing, join, staggered funding, claim-on-reveal, and refund-on-timeout.
-import { parseTx } from "@qbit-swap/client";
+import { parseTx, addressToScriptPubKey } from "@qbit-swap/client";
 import { bytesToHex as hex } from "@noble/hashes/utils.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 
@@ -28,8 +28,7 @@ export class MockChain {
     return txid;
   }
   fundAddr(address, amountSats) {
-    const spk = this.addr.get(address);
-    if (!spk) throw new Error(`mockchain: no spk registered for ${address}`);
+    const spk = this.addr.get(address) || hex(addressToScriptPubKey(address));   // decode any HTLC address → spk (no pre-registration needed)
     return this.fundSpk(spk, amountSats);
   }
   // ── the surface the coordinator calls ──────────────────────────────────────

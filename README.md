@@ -29,30 +29,37 @@ npm install
 npm test          # runs test/e2e.mock.mjs
 ```
 
-The e2e covers all four paths the bot must handle: a completed swap (with **coordinator-fee splitting**),
-a refund when the taker walks, a policy reject on an underpriced swap, and an **RFQ one-click buy**. It
-uses a mock chain, so it proves the bot↔coordinator *protocol* end to end; on-chain tx *validity* is
-covered by the client library's own regtest e2e (run that against a live regtest node when available).
+The e2e covers all six paths the bot must handle: a completed swap (with **coordinator-fee splitting**),
+a refund when the taker walks, a policy reject on an underpriced swap, an **RFQ one-click buy** (bot as
+Bob), an **RFQ one-click sell** (bot as Alice — it funds BTC and claims QBT on reveal), and the bot
+**refunding its own BTC** when a sell-side taker walks. It uses a mock chain, so it proves the
+bot↔coordinator *protocol* end to end; on-chain tx *validity* is covered by the client library's own
+regtest e2e (run that against a live regtest node when available).
 
 ## Three ways to source swaps
 
 ### 1. RFQ — powers the web app's one-click "instant swap" widget  *(recommended)*
-`MakerBot.serveRfq({ quote })` streams a live two-sided quote to the coordinator's `/rfq` layer and
+`MakerBot.serveRfq({ quote })` streams a live **two-sided** quote to the coordinator's `/rfq` layer and
 fulfills matches it hands back. The coordinator expires a quote if the bot stops pinging, so the loop
 **must keep running** — the ping *is* the liveness signal.
 
 ```js
 const bot = new MakerBot({ coordinatorUrl, wallet, policy, makerKey: "<RFQ_MAKER_KEYS value>" });
-await bot.serveRfq({ quote: { ask: { price: 0.20, qbtSats: 5_000_000_000 } }, pingMs: 3000 });
+await bot.serveRfq({ quote: {
+  ask: { price: 0.21, qbtSats: 5_000_000_000 },   // it SELLS QBT for BTC (retail buys)
+  bid: { price: 0.19, qbtSats: 5_000_000_000 },   // it BUYS QBT with BTC (retail sells)
+}, pingMs: 3000 });
 ```
 
 Prices are BTC per QBT; sizes are `qbtSats`. Retail sees the best live price in the widget and takes it
-in one click; the bot's next ping delivers the match and it fulfills as Bob.
+in one click; the bot's next ping delivers the match and it fulfills the right role automatically:
+- a retail **buy** hits the **ask** → the bot is **Bob** (funds QBT once the BTC is on-chain, claims BTC);
+- a retail **sell** hits the **bid** → the bot is **Alice**, the initiator (funds BTC up front, holds the
+  secret, claims the QBT on reveal — or refunds its BTC if the taker never funds).
 
-> **Ask-side only for now.** This bot makes the **ask** (it holds QBT, sells for BTC → it is Bob). A
-> retail *buy* hits the ask and is fulfilled. A retail *sell* hits a **bid** (maker = Alice, the
-> initiator who funds BTC, holds the secret, and claims QBT) — that role isn't implemented yet, so quote
-> `ask` only. Two-sided quoting is the main open follow-up (see below).
+> Quote one side or both. Making the **bid** means funding BTC before the taker commits QBT — inherent to
+> being the buyer; the exposure is bounded and always recoverable (the bot refunds after the timelock,
+> never loses funds), but size the `bid` to the inventory/capital you want exposed.
 
 ### 2. Order book (`makeMarket`)
 Posts a batch of QBT-for-BTC **asks** to the public order book and fulfills takes, replenishing each lot.
@@ -74,8 +81,6 @@ the claim's network fee comes out of the reserve, and the platform remainder goe
 no fee configured it just pays its own network fee from the amount.
 
 ## Open follow-ups
-- **Two-sided quoting** — an Alice-role fulfill (fund BTC, hold the secret, claim QBT on reveal) so the
-  bot can also make the **bid** side (retail selling QBT to it). Until then, quote ask-only.
 - **Dynamic claim/refund fees** — `feeSats` is a fixed per-leg network fee; the reference client sizes
   BTC claims at the live mempool rate. Under fee pressure a fixed fee can underpay and stall a claim.
 - **Concurrency/inventory caps** — `policy.maxQbtSats` bounds a single swap, but there's no global

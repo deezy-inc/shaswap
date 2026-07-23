@@ -22,13 +22,15 @@ const DUST = 546;
 
 /**
  * @typedef {Object} Wallet   maker's own funded nodes; the bot never hands keys to anyone.
- * @property {() => Promise<number>}                       qbitHeight   current QBT tip (refund gate)
- * @property {() => Promise<{address:string, spk:Uint8Array}>} newQbit   fresh QBT address (refund sink)
- * @property {() => Promise<{address:string, spk:Uint8Array}>} newBtc    fresh BTC address (receive sink)
- * @property {(address:string, sats:number) => Promise<string>} fundQbit  send sats to the QBT HTLC
+ * @property {() => Promise<number>}                       qbitHeight   current QBT tip (refund/claim gate)
+ * @property {() => Promise<number>}                       btcHeight    current BTC tip (Alice-side refund gate)
+ * @property {() => Promise<{address:string, spk:Uint8Array}>} newQbit   fresh QBT address (recv/refund sink)
+ * @property {() => Promise<{address:string, spk:Uint8Array}>} newBtc    fresh BTC address (recv/refund sink)
+ * @property {(address:string, sats:number) => Promise<string>} fundQbit  send sats to the QBT HTLC (Bob side)
+ * @property {(address:string, sats:number) => Promise<string>} fundBtc   send sats to the BTC HTLC (Alice side)
  *
  * @typedef {Object} Policy
- * @property {number} minRate      floor on btcSats/qbtSats (BTC received per QBT given out)
+ * @property {number} minRate      floor on btcSats/qbtSats (BTC paid per QBT — bid ceiling / ask floor)
  * @property {number} maxQbtSats   max QBT to expose on a single swap (inventory / blast radius)
  */
 
@@ -82,11 +84,9 @@ export class MakerBot {
   // if it goes silent — and the same ping response delivers any matches (a retail take), each with the
   // maker's per-swap token + role. This loop pings on `pingMs` and fulfills every match it can.
   //
-  // NOTE: this bot only makes the ASK side (it holds QBT, sells for BTC → it is Bob). A retail BUY hits
-  // the ask (maker=bob) and is fulfilled here. A retail SELL hits a bid (maker=alice) — being the
-  // initiator (funding BTC, holding the secret, claiming QBT) is not yet implemented, so quoting a `bid`
-  // and then dropping its matches would stalls takers; we therefore quote ask-only and skip/scream if a
-  // bid match ever arrives. Two-sided quoting needs an alice-role fulfill (see README follow-ups).
+  // Two-sided: a retail BUY hits the ask (maker = Bob → fulfill()); a retail SELL hits the bid
+  // (maker = Alice → fulfillAsAlice(): the bot is the initiator — it funds BTC up front, holds the
+  // secret, and claims QBT on reveal, or refunds its BTC if the taker never funds). Quote either or both.
   async #rfqPing(body) {
     const r = await fetch(`${this.base}/rfq/maker`, {
       method: "POST",
@@ -106,12 +106,11 @@ export class MakerBot {
         const { matches = [] } = await this.#rfqPing(quote);
         for (const m of matches) {
           if (this.handling.has(m.swapId)) continue;
-          if (m.role !== "bob") { this.log(`[maker] SKIP ${m.side} match ${m.swapId.slice(0, 8)} — role ${m.role} unsupported (ask-side/bob only)`); continue; }
+          const run = m.role === "alice" ? this.fulfillAsAlice({ id: m.swapId, token: m.token }) : this.fulfill({ id: m.swapId, token: m.token });
           this.handling.add(m.swapId);
-          this.log(`[maker] RFQ match ${m.swapId.slice(0, 8)} (${m.side} ${m.qbtSats / 1e8} QBT @ ${m.price}) — fulfilling`);
-          this.fulfill({ id: m.swapId, token: m.token })
-            .then((r) => this.log(`[maker] RFQ ${m.swapId.slice(0, 8)} -> ${r.outcome}`))
-            .catch((e) => { this.log(`[maker] RFQ fulfill error: ${e.message}`); this.handling.delete(m.swapId); });
+          this.log(`[maker] RFQ match ${m.swapId.slice(0, 8)} (${m.side} ${m.qbtSats / 1e8} QBT @ ${m.price}) — fulfilling as ${m.role}`);
+          run.then((r) => this.log(`[maker] RFQ ${m.swapId.slice(0, 8)} -> ${r.outcome}`))
+             .catch((e) => { this.log(`[maker] RFQ fulfill error: ${e.message}`); this.handling.delete(m.swapId); });
         }
       } catch (e) { this.log(`[maker] RFQ ping error: ${e.message}`); }
       await sleep(pingMs);
@@ -242,6 +241,82 @@ export class MakerBot {
     });
     const r = await this.#api(`/swaps/${id}/broadcast`, { token, method: "POST", body: { leg: "qbit", kind: "refund", tx: hex(tx) } });
     this.log(`[maker] refunded QBT ${r.txid.slice(0, 12)} -> ${r.state}`);
+    return { accepted: true, outcome: "refunded", txid: r.txid };
+  }
+
+  // ── Alice side (bid): the bot IS the initiator ──────────────────────────────────────────────────
+  // Used when the bot makes the BID (retail sells QBT to it): it holds the secret, funds BTC (the longer,
+  // refundable leg) up front, waits for the taker's QBT, then claims the QBT — revealing the preimage —
+  // once the coordinator says it's safe (CLAIMABLE). If the taker never funds, its BTC stays refundable
+  // and it reclaims it after the timelock. Funding BTC before the taker commits is inherent to being the
+  // buyer; the exposure is bounded and always recoverable (never lost), which is the Tier-Nolan guarantee.
+  async fulfillAsAlice({ id, token }) {
+    // 1) ephemeral, per-swap keys — INCLUDING the secret we (the initiator) commit to.
+    const qbit = await slhDsaKeygen(cryptoRandom(128));
+    const btcPriv = cryptoRandom(32), btcPub = compressedPub(btcPriv);
+    const secret = cryptoRandom(32), H = sha256(secret);
+    const qbitDest = await this.wallet.newQbit();     // where we receive the QBT we're buying
+    const btcDest = await this.wallet.newBtc();       // BTC refund sink (if the taker never funds)
+
+    // 2) join as Alice WITH H (only the initiator commits the hash).
+    await this.#api(`/swaps/${id}/party`, {
+      token, method: "POST",
+      body: { qbitPub: hex(qbit.pk), btcPub: hex(btcPub), btcDest: btcDest.address, qbitDest: qbitDest.address, H: hex(H) },
+    });
+    const ready = await this.#poll(`/swaps/${id}`, token, (v) => v.state !== "CREATED" && v.htlc);
+    this.log(`[maker] joined swap ${id.slice(0, 12)} as Alice -> ${ready.state}; BTC HTLC ${ready.htlc.btc.address}`);
+
+    // 3) fund our BTC leg FIRST (the initiator funds unconditionally; it stays refundable until we reveal).
+    //    The buyer funds the coordinator fee on top of terms.btcSats — so does the bot as buyer.
+    const btcAmt = ready.terms.btcSats + (ready.fee?.sats || 0);
+    const fundTxid = await this.wallet.fundBtc(ready.htlc.btc.address, btcAmt);
+    this.log(`[maker] funded BTC HTLC ${btcAmt} sats (${fundTxid.slice(0, 12)}); awaiting the taker's QBT`);
+
+    // 4) race: the taker funds QBT and it matures -> we claim QBT (revealing the preimage); or the taker
+    //    never funds and our BTC timelock passes -> we refund the BTC. We only ever reveal at CLAIMABLE,
+    //    which the coordinator sets only once BOTH legs are buried and it's still safe (never too late).
+    while (true) {
+      const v = await this.#api(`/swaps/${id}`, { token });
+      if (v.state === "CLAIMABLE" && v.funding?.qbit) return this.#claimQbit({ id, token, v, qbit, secret, destSpk: qbitDest.spk });
+      const h = await this.wallet.btcHeight();
+      if (v.funding?.btc && !v.funding.btc.spent && !v.preimage && h >= v.locktimes.btc) return this.#refundBtc({ id, token, v, btcPriv, destSpk: btcDest.spk });
+      await sleep(this.pollMs);
+    }
+  }
+
+  // Both legs are buried & safe: claim the taker's QBT to our sink, revealing the preimage in the witness
+  // (this is what lets the taker then claim our BTC). No coordinator-fee output here — the fee rides the
+  // BTC leg, which the taker claims.
+  async #claimQbit({ id, token, v, qbit, secret, destSpk }) {
+    const f = v.funding.qbit, leaf = bin(v.htlc.qbit.leaf), spk = bin(v.htlc.qbit.spk);
+    const prevoutLE = bin(f.txid).reverse(), outVal = f.amountSats - this.feeSats.qbit;
+    const sh = p2mrSighash({
+      version: 2, locktime: 0,
+      vin: [{ txidLE: prevoutLE, vout: f.vout, sequence: 0xffffffff }],
+      spentOutputs: [{ amount: f.amountSats, spk }],
+      vout: [{ value: outVal, spk: destSpk }], inputIndex: 0, leafScript: leaf,
+    });
+    const sig = await slhDsaSign(qbit.sk, sh);
+    // CLAIM branch: the 0x01 selector picks IF; `secret` is revealed here.
+    const tx = serializeTx({
+      version: 2, vin: [[prevoutLE, f.vout, new Uint8Array(0), 0xffffffff]],
+      vout: [[BigInt(outVal), destSpk]],
+      wit: [[sig, secret, Uint8Array.of(0x01), leaf, P2MR_CONTROL_SINGLE_LEAF]], locktime: 0,
+    });
+    const r = await this.#api(`/swaps/${id}/broadcast`, { token, method: "POST", body: { leg: "qbit", kind: "claim", tx: hex(tx) } });
+    this.log(`[maker] claimed QBT ${r.txid.slice(0, 12)} -> ${r.state} (revealed preimage; taker can now claim BTC)`);
+    return { accepted: true, outcome: "completed", txid: r.txid };
+  }
+
+  // The taker never funded QBT; our BTC timelock has passed — reclaim our BTC to ourselves.
+  async #refundBtc({ id, token, v, btcPriv, destSpk }) {
+    const f = v.funding.btc, ws = bin(v.htlc.btc.witnessScript);
+    const tx = btcSpend({
+      prevTxidLE: bin(f.txid).reverse(), vout: f.vout, amount: f.amountSats, ws, priv: btcPriv,
+      destSpk, outVal: f.amountSats - this.feeSats.btc, branch: "refund", locktime: v.locktimes.btc,
+    });
+    const r = await this.#api(`/swaps/${id}/broadcast`, { token, method: "POST", body: { leg: "btc", kind: "refund", tx: hex(tx) } });
+    this.log(`[maker] refunded BTC ${r.txid.slice(0, 12)} -> ${r.state}`);
     return { accepted: true, outcome: "refunded", txid: r.txid };
   }
 }
