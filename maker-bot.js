@@ -14,10 +14,11 @@ import { bytesToHex as hex, hexToBytes as bin } from "@noble/hashes/utils.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import {
   slhDsaKeygen, slhDsaSign, compressedPub,
-  p2mrSighash, serializeTx, P2MR_CONTROL_SINGLE_LEAF, btcSpend,
+  p2mrSighash, serializeTx, P2MR_CONTROL_SINGLE_LEAF, btcSpend, addressToScriptPubKey,
 } from "@qbit-swap/client";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const DUST = 546;
 
 /**
  * @typedef {Object} Wallet   maker's own funded nodes; the bot never hands keys to anyone.
@@ -33,14 +34,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export class MakerBot {
   /** @param {{coordinatorUrl:string, wallet:Wallet, policy:Policy, pollMs?:number, feeSats?:{qbit:number,btc:number}, log?:Function}} cfg */
-  constructor({ coordinatorUrl, wallet, policy, pollMs = 2000, feeSats = { qbit: 100000, btc: 5000 }, log = console.log }) {
+  constructor({ coordinatorUrl, wallet, policy, pollMs = 2000, feeSats = { qbit: 100000, btc: 5000 }, makerKey = null, log = console.log }) {
     this.base = coordinatorUrl.replace(/\/$/, "");
     this.wallet = wallet;
     this.policy = policy;
     this.pollMs = pollMs;
-    this.feeSats = feeSats;
+    this.feeSats = feeSats;                       // network fee the bot pays for its own claim/refund tx, per leg
+    this.makerKey = makerKey;                     // RFQ X-Maker-Key (serveRfq); null for order-book / link modes
     this.log = log;
     this.offers = new Map();   // offerId -> { makerToken, lot, handling }
+    this.handling = new Set(); // swapIds already being fulfilled (RFQ matches re-deliver until we join)
   }
 
   async #api(path, { token, method = "GET", body } = {}) {
@@ -71,6 +74,48 @@ export class MakerBot {
     if (terms.qbtSats > this.policy.maxQbtSats) return { accept: false, rate, reason: `qbt ${terms.qbtSats} > cap ${this.policy.maxQbtSats}` };
     if (rate < this.policy.minRate) return { accept: false, rate, reason: `rate ${rate.toFixed(6)} < floor ${this.policy.minRate}` };
     return { accept: true, rate, reason: "within policy" };
+  }
+
+  // ── RFQ: stream a live two-sided quote and fulfill matches the coordinator hands back ──
+  // The coordinator's /rfq layer is the backend for the web app's one-click "instant swap" widget:
+  // retail takes the best live maker price. A maker must KEEP PINGING — its quote expires (RFQ_TTL_MS)
+  // if it goes silent — and the same ping response delivers any matches (a retail take), each with the
+  // maker's per-swap token + role. This loop pings on `pingMs` and fulfills every match it can.
+  //
+  // NOTE: this bot only makes the ASK side (it holds QBT, sells for BTC → it is Bob). A retail BUY hits
+  // the ask (maker=bob) and is fulfilled here. A retail SELL hits a bid (maker=alice) — being the
+  // initiator (funding BTC, holding the secret, claiming QBT) is not yet implemented, so quoting a `bid`
+  // and then dropping its matches would stalls takers; we therefore quote ask-only and skip/scream if a
+  // bid match ever arrives. Two-sided quoting needs an alice-role fulfill (see README follow-ups).
+  async #rfqPing(body) {
+    const r = await fetch(`${this.base}/rfq/maker`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-maker-key": this.makerKey || "" },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(`/rfq/maker: ${j.error || r.status}`);
+    return j;   // { ok, ttlMs, quote, matches:[{swapId, token, role, side, price, btcSats, qbtSats}] }
+  }
+  // quote: { ask?: {price, qbtSats}, bid?: {price, qbtSats} } — price is BTC per QBT. Ask-only recommended.
+  async serveRfq({ quote, pingMs = 3000 }) {
+    if (!this.makerKey) throw new Error("serveRfq needs a makerKey (the coordinator's RFQ_MAKER_KEYS value)");
+    this.log(`[maker] RFQ market up: ${JSON.stringify(quote)} (ping ${pingMs}ms)`);
+    for (;;) {
+      try {
+        const { matches = [] } = await this.#rfqPing(quote);
+        for (const m of matches) {
+          if (this.handling.has(m.swapId)) continue;
+          if (m.role !== "bob") { this.log(`[maker] SKIP ${m.side} match ${m.swapId.slice(0, 8)} — role ${m.role} unsupported (ask-side/bob only)`); continue; }
+          this.handling.add(m.swapId);
+          this.log(`[maker] RFQ match ${m.swapId.slice(0, 8)} (${m.side} ${m.qbtSats / 1e8} QBT @ ${m.price}) — fulfilling`);
+          this.fulfill({ id: m.swapId, token: m.token })
+            .then((r) => this.log(`[maker] RFQ ${m.swapId.slice(0, 8)} -> ${r.outcome}`))
+            .catch((e) => { this.log(`[maker] RFQ fulfill error: ${e.message}`); this.handling.delete(m.swapId); });
+        }
+      } catch (e) { this.log(`[maker] RFQ ping error: ${e.message}`); }
+      await sleep(pingMs);
+    }
   }
 
   // ── order book: post asks at several lot sizes and fulfill any that get taken ──
@@ -153,14 +198,28 @@ export class MakerBot {
   }
 
   // Taker revealed the preimage on the QBT chain; sweep the BTC HTLC to our sink.
+  //
+  // Coordinator-fee awareness: when the coordinator charges a platform fee, the buyer funds the BTC HTLC
+  // with terms.btcSats + fee.sats, and the fee is a SEPARATE output the claim must pay to fee.address —
+  // it's honor-system (the coordinator is keyless and doesn't validate claim outputs), so a fee-blind
+  // claim would silently pocket the platform's cut AND overpay us. We split it exactly like the reference
+  // client: we net terms.btcSats (funding − fee.sats), the network fee for this tx comes out of the fee
+  // reserve, and the platform remainder goes to fee.address. With no fee configured, we just pay our own
+  // network fee out of the amount, as before.
   async #claimBtc({ id, token, v, btcPriv, destSpk }) {
     const f = v.funding.btc, ws = bin(v.htlc.btc.witnessScript);
+    let outVal = f.amountSats - this.feeSats.btc, extraOut = null;
+    if (v.fee?.sats > 0 && v.fee.address) {
+      outVal = f.amountSats - v.fee.sats;                                        // we net exactly the agreed amount
+      const feeOut = v.fee.sats - Math.min(Math.max(0, this.feeSats.btc), v.fee.sats);   // platform remainder after the capped network fee
+      if (feeOut > DUST) extraOut = { spk: addressToScriptPubKey(v.fee.address), value: feeOut };
+    }
     const tx = btcSpend({
       prevTxidLE: bin(f.txid).reverse(), vout: f.vout, amount: f.amountSats, ws, priv: btcPriv,
-      destSpk, outVal: f.amountSats - this.feeSats.btc, branch: "claim", preimage: bin(v.preimage),
+      destSpk, outVal, branch: "claim", preimage: bin(v.preimage), extraOut,
     });
     const r = await this.#api(`/swaps/${id}/broadcast`, { token, method: "POST", body: { leg: "btc", kind: "claim", tx: hex(tx) } });
-    this.log(`[maker] claimed BTC ${r.txid.slice(0, 12)} -> ${r.state}`);
+    this.log(`[maker] claimed BTC ${r.txid.slice(0, 12)} -> ${r.state}${extraOut ? ` (fee ${extraOut.value} → coordinator)` : ""}`);
     return { accepted: true, outcome: "completed", txid: r.txid };
   }
 

@@ -4,7 +4,7 @@
   "description": "Automated market-maker bots for qbit-swap (PRIVATE)",
   "main": "maker-bot.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node test/e2e.mock.mjs"
   },
   "keywords": [],
   "author": "",
@@ -12,8 +12,8 @@
   "type": "module",
   "private": true,
   "dependencies": {
-    "@noble/hashes": "^1.7.1",
-    "@qbit-swap/client": "file:../qbit-otc/swaplib/js"
+    "@noble/hashes": "^2.2.0",
+    "@qbit-swap/client": "file:../qbit-otc/client"
   },
   "exports": {
     ".": "./maker-bot.js"
