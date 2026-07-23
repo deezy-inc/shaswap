@@ -46,6 +46,7 @@ export class MakerBot {
     this.log = log;
     this.offers = new Map();   // offerId -> { makerToken, lot, handling }
     this.handling = new Set(); // swapIds already being fulfilled (RFQ matches re-deliver until we join)
+    this.inflight = new Map(); // swapId -> { btcSats?|qbtSats? } committed but not yet funded (inventory reserve)
   }
 
   async #api(path, { token, method = "GET", body } = {}) {
@@ -97,24 +98,49 @@ export class MakerBot {
     if (!r.ok) throw new Error(`/rfq/maker: ${j.error || r.status}`);
     return j;   // { ok, ttlMs, quote, matches:[{swapId, token, role, side, price, btcSats, qbtSats}] }
   }
-  // quote: { ask?: {price, qbtSats}, bid?: {price, qbtSats} } — price is BTC per QBT.
-  // pingMs: the ping only has to land inside the coordinator's quote TTL (RFQ_TTL_MS, default 30s), so
-  // ~10s keeps the quote live with a dropped-ping cushion. It ALSO bounds how stale your quoted price can
-  // be (a taker fills at your last-pinged price), so ping as often as you want to move price — every few
-  // seconds if you're tracking the market, 10–15s if your price is steady. (Not 200ms; that's test speed.)
-  async serveRfq({ quote, pingMs = 10000 }) {
+  // Inventory-aware sizing: how much can each side ACTUALLY be covered right now? Available = the wallet's
+  // spendable balance, minus a keep-back reserve you never quote, minus what's already committed to
+  // in-flight swaps the bot picked up but hasn't funded yet (`this.inflight` — released the moment the
+  // node balance itself reflects the spend, i.e. right after funding, so we never double-count). The ask
+  // (we SELL QBT) is capped by QBT on hand; the bid (we BUY QBT, paying BTC) by BTC / bid price. A side
+  // that can't cover the coordinator minimum is dropped (quoted as null) until inventory returns.
+  //   Requires wallet.balances() -> { btcSats, qbtSats }; without it, sizes stay static (back-compat).
+  async #sizeQuote(quote, keepBtc, keepQbt) {
+    if (!this.wallet.balances) return quote;                       // no balance source → quote the static sizes
+    let bal;
+    try { bal = await this.wallet.balances(); } catch (e) { this.log(`[maker] balance check failed: ${e.message} — skipping this ping`); return null; }
+    let btc = bal.btcSats, qbt = bal.qbtSats;
+    for (const r of this.inflight.values()) { btc -= r.btcSats || 0; qbt -= r.qbtSats || 0; }   // subtract un-funded commitments
+    const btcAvail = Math.max(0, btc - (keepBtc || 0)), qbtAvail = Math.max(0, qbt - (keepQbt || 0));
+    const cap = (size, avail) => (size > 0 ? { size } : null) && Math.min(size, Math.max(0, Math.floor(avail)));
+    const out = {};
+    if ("ask" in quote && quote.ask) { const s = cap(quote.ask.qbtSats, qbtAvail); out.ask = s > 0 ? { price: quote.ask.price, qbtSats: s } : null; }
+    if ("bid" in quote && quote.bid) { const s = cap(quote.bid.qbtSats, btcAvail / quote.bid.price); out.bid = s > 0 ? { price: quote.bid.price, qbtSats: s } : null; }
+    return out;
+  }
+  // quote: { ask?: {price, qbtSats}, bid?: {price, qbtSats} } — price is BTC per QBT. These are the MAX
+  // sizes; each ping re-sizes them down to live inventory (see #sizeQuote). reserveBtcSats/reserveQbtSats
+  // is a keep-back you never quote (gas/float). pingMs: the ping only has to land inside the coordinator's
+  // quote TTL (RFQ_TTL_MS, default 30s), so ~10s keeps the quote live with a dropped-ping cushion. It ALSO
+  // bounds how stale your quoted price can be (a taker fills at your last-pinged price), so ping as often
+  // as you re-price — every few seconds tracking the market, 10–15s if steady. (200ms is just test speed.)
+  async serveRfq({ quote, pingMs = 10000, reserveBtcSats = 0, reserveQbtSats = 0 }) {
     if (!this.makerKey) throw new Error("serveRfq needs a makerKey (the coordinator's RFQ_MAKER_KEYS value)");
-    this.log(`[maker] RFQ market up: ${JSON.stringify(quote)} (ping ${pingMs}ms)`);
+    this.log(`[maker] RFQ market up: ${JSON.stringify(quote)} (ping ${pingMs}ms${this.wallet.balances ? ", inventory-sized" : ""})`);
     for (;;) {
       try {
-        const { matches = [] } = await this.#rfqPing(quote);
+        const sized = await this.#sizeQuote(quote, reserveBtcSats, reserveQbtSats);
+        if (sized === null) { await sleep(pingMs); continue; }       // balance unreadable → don't quote blind
+        const { matches = [] } = await this.#rfqPing(sized);
         for (const m of matches) {
           if (this.handling.has(m.swapId)) continue;
-          const run = m.role === "alice" ? this.fulfillAsAlice({ id: m.swapId, token: m.token }) : this.fulfill({ id: m.swapId, token: m.token });
           this.handling.add(m.swapId);
+          this.inflight.set(m.swapId, m.role === "alice" ? { btcSats: m.btcSats } : { qbtSats: m.qbtSats });   // reserve the leg we'll fund until it's funded
+          const run = m.role === "alice" ? this.fulfillAsAlice({ id: m.swapId, token: m.token }) : this.fulfill({ id: m.swapId, token: m.token });
           this.log(`[maker] RFQ match ${m.swapId.slice(0, 8)} (${m.side} ${m.qbtSats / 1e8} QBT @ ${m.price}) — fulfilling as ${m.role}`);
           run.then((r) => this.log(`[maker] RFQ ${m.swapId.slice(0, 8)} -> ${r.outcome}`))
-             .catch((e) => { this.log(`[maker] RFQ fulfill error: ${e.message}`); this.handling.delete(m.swapId); });
+             .catch((e) => { this.log(`[maker] RFQ fulfill error: ${e.message}`); })
+             .finally(() => { this.handling.delete(m.swapId); this.inflight.delete(m.swapId); });
         }
       } catch (e) { this.log(`[maker] RFQ ping error: ${e.message}`); }
       await sleep(pingMs);
@@ -187,6 +213,7 @@ export class MakerBot {
 
     // 4) fund our QBT leg.
     const fundTxid = await this.wallet.fundQbit(ready.htlc.qbit.address, ready.terms.qbtSats);
+    this.inflight.delete(id);   // funded — the node balance now reflects this spend, so drop the reserve (no double-count)
     this.log(`[maker] funded QBT HTLC ${ready.terms.qbtSats} sats (${fundTxid.slice(0, 12)})`);
 
     // 5) race: either the taker claims QBT (revealing the preimage -> we claim BTC), or the QBT
@@ -274,6 +301,7 @@ export class MakerBot {
     //    The buyer funds the coordinator fee on top of terms.btcSats — so does the bot as buyer.
     const btcAmt = ready.terms.btcSats + (ready.fee?.sats || 0);
     const fundTxid = await this.wallet.fundBtc(ready.htlc.btc.address, btcAmt);
+    this.inflight.delete(id);   // funded — the node balance now reflects this spend, so drop the reserve
     this.log(`[maker] funded BTC HTLC ${btcAmt} sats (${fundTxid.slice(0, 12)}); awaiting the taker's QBT`);
 
     // 4) race: the taker funds QBT and it matures -> we claim QBT (revealing the preimage); or the taker

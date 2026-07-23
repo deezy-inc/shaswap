@@ -35,6 +35,7 @@ const until = async (fn, ms = 400, tries = 200) => { for (let i = 0; i < tries; 
 let ok = true; const ck = (c, m) => { console.log((c ? "[ok] " : "[FAIL] ") + m); ok = ok && c; };
 
 // A wallet adapter for the bot backed by the mock QBT chain (funds by address; dest spks are throwaway).
+const inv = { btcSats: 1e13, qbtSats: 1e13 };   // mutable stand-in for the maker's spendable balances (ample by default)
 const wallet = {
   qbitHeight: async () => mock.qbit.height,
   btcHeight: async () => mock.btc.height,
@@ -42,6 +43,7 @@ const wallet = {
   newBtc: async () => ({ address: `bdest-${hex(randomBytes(4))}`, spk: randomBytes(22) }),
   fundQbit: async (address, sats) => mock.qbit.fundAddr(address, sats),
   fundBtc: async (address, sats) => mock.btc.fundAddr(address, sats),
+  balances: async () => ({ ...inv }),
 };
 const policy = { minRate: 0.1, maxQbtSats: 10_000_000_000 };   // floor 0.1 BTC/QBT; cap 100 QBT
 
@@ -183,7 +185,22 @@ async function main() {
     ck(final.state === "REFUNDED", `bot reclaimed its BTC → REFUNDED (${final.state})`);
   }
 
-  console.log(ok ? "\nPASS — MakerBot: buy + sell (Bob & Alice roles) + refunds + reject, all against the live API" : "\nFAIL");
+  // ── 7) inventory-aware sizing: quotes track live spendable balance ───────────────────────────
+  console.log("\n=== scenario 7: quote sizes track live inventory (wallet.balances) ===");
+  {
+    inv.qbtSats = 300_000_000;   // only 3 QBT on hand (the ask is configured at 50 QBT)
+    const d = await until(async () => { const x = await api("/rfq"); return x.buy?.qbtSats === 3e8 ? x : null; });
+    ck(d.buy.qbtSats === 3e8, "ask depth capped to QBT on hand (3 QBT), below the configured 50 QBT");
+    ck(d.sell.qbtSats === 5e9, "bid side unaffected — ample BTC to keep buying QBT");
+    inv.qbtSats = 0;             // fully out of QBT
+    const d2 = await until(async () => { const x = await api("/rfq"); return x.buy?.qbtSats === 0 ? x : null; });
+    ck(d2.buy.qbtSats === 0 && d2.sell.qbtSats === 5e9, "ask dropped to zero when QBT is exhausted; bid stays live");
+    inv.qbtSats = 1e13;          // restock → ask returns
+    const d3 = await until(async () => { const x = await api("/rfq"); return x.buy?.qbtSats === 5e9 ? x : null; });
+    ck(d3.buy.qbtSats === 5e9, "ask returns to full size once QBT inventory is restored");
+  }
+
+  console.log(ok ? "\nPASS — MakerBot: buy + sell (Bob & Alice roles) + refunds + reject + inventory sizing, all against the live API" : "\nFAIL");
   process.exit(ok ? 0 : 1);
 }
 main().catch((e) => { console.error("ERROR:", e.stack || e.message); process.exit(1); });

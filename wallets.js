@@ -46,6 +46,9 @@ async function fresh(call, kind) {
 // sats → a Core amount string with 8 dp (avoids float drift). sendtoaddress deposits EXACTLY this into
 // the HTLC; the wallet pays the network fee on top from its balance.
 const toAmount = (sats) => (sats / 1e8).toFixed(8);
+// Spendable balance in sats — Core's getbalances().mine.trusted (confirmed + own unconfirmed change),
+// which is what's actually available to fund a swap right now.
+const spendable = async (call) => Math.round(((await call("getbalances"))?.mine?.trusted || 0) * 1e8);
 
 // Assemble the six-method adapter the bot expects from two node clients.
 export function walletAdapter({ btc, qbit, btcAddrType = "bech32" }) {
@@ -56,5 +59,7 @@ export function walletAdapter({ btc, qbit, btcAddrType = "bech32" }) {
     newQbit:    () => fresh(qbit, null),          // qbitd's default (post-quantum) address type
     fundBtc:  (address, sats) => btc("sendtoaddress", address, toAmount(sats)),
     fundQbit: (address, sats) => qbit("sendtoaddress", address, toAmount(sats)),
+    // Live spendable inventory — serveRfq sizes each quote to this (minus in-flight + your keep-back).
+    balances: async () => { const [btcSats, qbtSats] = await Promise.all([spendable(btc), spendable(qbit)]); return { btcSats, qbtSats }; },
   };
 }

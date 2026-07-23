@@ -65,12 +65,21 @@ npm install
 npm test          # runs test/e2e.mock.mjs
 ```
 
-The e2e covers all six paths the bot must handle: a completed swap (with **coordinator-fee splitting**),
+The e2e covers all seven paths the bot must handle: a completed swap (with **coordinator-fee splitting**),
 a refund when the taker walks, a policy reject on an underpriced swap, an **RFQ one-click buy** (bot as
-Bob), an **RFQ one-click sell** (bot as Alice — it funds BTC and claims QBT on reveal), and the bot
-**refunding its own BTC** when a sell-side taker walks. It uses a mock chain, so it proves the
-bot↔coordinator *protocol* end to end; on-chain tx *validity* is covered by the client library's own
-regtest e2e (run that against a live regtest node when available).
+Bob), an **RFQ one-click sell** (bot as Alice — it funds BTC and claims QBT on reveal), the bot
+**refunding its own BTC** when a sell-side taker walks, and **inventory-aware quote sizing** (quotes
+track live balance). It uses a mock chain, so it proves the bot↔coordinator *protocol* end to end;
+on-chain tx *validity* is covered by the client library's own regtest e2e (run against a live node).
+
+## Inventory-aware quoting
+`serveRfq` re-sizes the quote on every ping to what the wallet can actually cover: **available =
+spendable balance − a keep-back reserve − in-flight commitments** (swaps picked up but not yet funded).
+The ask (it sells QBT) is capped by QBT on hand; the bid (it buys QBT with BTC) by BTC ÷ bid price. A
+side that can't cover the coordinator minimum is quoted as `null` (dropped) until inventory returns. So
+the sizes you pass to `serveRfq` are *ceilings*, and the bot never quotes depth it can't fund. This
+needs `wallet.balances() -> { btcSats, qbtSats }` (the Core adapter implements it via `getbalances`);
+without it, sizes stay static. Tune the keep-back with `serveRfq({ …, reserveBtcSats, reserveQbtSats })`.
 
 ## Three ways to source swaps
 
