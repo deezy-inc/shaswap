@@ -4,7 +4,7 @@
   "description": "Autonomous market-maker bot for BTC<->QBT atomic swaps (reference maker for the qbit-swap RFQ API)",
   "main": "maker-bot.js",
   "scripts": {
-    "test": "node test/wallets.test.mjs && node test/keystore.test.mjs && node test/telegram.test.mjs && node test/e2e.mock.mjs"
+    "test": "node test/wallets.test.mjs && node test/keystore.test.mjs && node test/telegram.test.mjs && node test/light.test.mjs && node test/e2e.mock.mjs"
   },
   "keywords": [],
   "author": "",
@@ -13,7 +13,9 @@
   "private": true,
   "dependencies": {
     "@noble/hashes": "^2.2.0",
-    "@qbit-swap/client": "file:../client"
+    "@qbit-swap/client": "file:../client",
+    "@scure/bip32": "^2.2.0",
+    "@scure/bip39": "^2.2.0"
   },
   "exports": {
     ".": "./maker-bot.js"

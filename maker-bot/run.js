@@ -34,19 +34,55 @@ const num = (flag, env, dflt) => { const v = opt(flag, env, dflt); return v == n
 const die = (msg) => { console.error(`\n${msg}\n\nUsage:  node run.js --bid 0.19 --ask 0.21 --size 50\n        (see the header of run.js for all flags / env vars)\n`); process.exit(1); };
 
 if (args.help || args.h) die("Fixed-price RFQ maker.");
+
+// ── LIGHT MODE: no nodes — one seed phrase (encrypted at rest), public esplora APIs ──────────────
+//   node run.js --light --init                    first run: makes + seals the seed, prints it ONCE
+//   node run.js --light --bid 0.19 --ask 0.21     runs the maker from the sealed seed
+// Env: LIGHT_SEED_FILE (./maker-seed.enc) · LIGHT_PASSWORD (headless) · BTC_ESPLORA / QBIT_ESPLORA
+const LIGHT = !!args.light;
+const SEED_FILE = opt("seed-file", "LIGHT_SEED_FILE", "./maker-seed.enc");
+if (LIGHT && args.init) {
+  const { newMnemonic } = await import("./light/hd.js");
+  const { sealSeed, promptPassword } = await import("./light/seedstore.js");
+  const mnemonic = newMnemonic();
+  console.log("\nYour seed phrase (write it down NOW — it is shown exactly once, and it IS the funds):\n");
+  console.log(`    ${mnemonic}\n`);
+  const p1 = await promptPassword("choose a wallet password (min 8 chars): ");
+  const p2 = await promptPassword("repeat it: ");
+  if (p1 !== p2) die("passwords don't match — nothing written; run --init again");
+  sealSeed(SEED_FILE, mnemonic, p1);
+  console.log(`sealed → ${SEED_FILE} (AES-256-GCM, scrypt). Fund the addresses shown on next start.`);
+  process.exit(0);
+}
+
 const coordinatorUrl = opt("coordinator", "COORDINATOR_URL") || die("missing --coordinator (or COORDINATOR_URL)");
 const makerKey = opt("key", "MAKER_KEY") || die("missing --key (or MAKER_KEY)");
-const btcRpc = opt("btc-rpc", "BTC_RPC_URL") || die("missing --btc-rpc (or BTC_RPC_URL)");
-const qbitRpc = opt("qbit-rpc", "QBIT_RPC_URL") || die("missing --qbit-rpc (or QBIT_RPC_URL)");
 const bid = num("bid", "BID", null), ask = num("ask", "ASK", null);
 if (bid == null && ask == null) die("set a fixed --bid and/or --ask (BTC per QBT)");
 if (bid != null && ask != null && bid >= ask) die(`--bid (${bid}) must be below --ask (${ask})`);
 const sizeQbt = num("size", "SIZE_QBT", 50);
 
-const wallet = walletAdapter({
-  btc:  rpcWallet(btcRpc, process.env.BTC_WALLET || "maker"),
-  qbit: rpcWallet(qbitRpc, process.env.QBIT_WALLET || "maker"),
-});
+let wallet;
+if (LIGHT) {
+  const { checkMnemonic, mnemonicToSeed } = await import("./light/hd.js");
+  const { openSeed, promptPassword } = await import("./light/seedstore.js");
+  const { lightWallet } = await import("./light/lightwallet.js");
+  const mnemonic = openSeed(SEED_FILE, await promptPassword());
+  if (!checkMnemonic(mnemonic)) die("sealed seed is not a valid mnemonic");
+  wallet = await lightWallet({
+    seed: mnemonicToSeed(mnemonic),
+    btcApi: opt("btc-esplora", "BTC_ESPLORA", "https://mempool.space/api"),
+    qbitApi: opt("qbit-esplora", "QBIT_ESPLORA", "https://qbitmempool.robertclarke.com/api"),
+    btcHrp: process.env.BTC_HRP || "bc", qbitHrp: process.env.QBIT_HRP || "qb",
+  });
+} else {
+  const btcRpc = opt("btc-rpc", "BTC_RPC_URL") || die("missing --btc-rpc (or BTC_RPC_URL) — or use --light");
+  const qbitRpc = opt("qbit-rpc", "QBIT_RPC_URL") || die("missing --qbit-rpc (or QBIT_RPC_URL)");
+  wallet = walletAdapter({
+    btc:  rpcWallet(btcRpc, process.env.BTC_WALLET || "maker"),
+    qbit: rpcWallet(qbitRpc, process.env.QBIT_WALLET || "maker"),
+  });
+}
 const keystore = fileKeystore();   // durable per-swap keys (MAKER_KEY_DIR, default ./maker-keys) — crash-safe
 const bot = new MakerBot({
   coordinatorUrl, makerKey, wallet, keystore,

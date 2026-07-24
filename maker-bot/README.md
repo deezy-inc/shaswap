@@ -119,6 +119,35 @@ Fixed prices in BTC per QBT, `--size` in QBT per side (a ceiling — inventory s
 Quote one side only by passing just `--bid` or just `--ask`. All flags have env twins (see `run.js`'s
 header); connection config usually lives in env, prices on the command line.
 
+## Light mode — no nodes, one seed phrase
+
+Run a maker without bitcoind or qbitd: one BIP39 seed phrase backs BOTH chains, encrypted at rest, with
+balances and broadcasts through public esplora APIs (mempool.space for BTC; a mempool.space-style
+instance for QBT):
+
+```
+node run.js --light --init                     # once: makes + seals the seed (shown exactly once)
+node run.js --light --bid 0.19 --ask 0.21      # runs the maker from the sealed seed
+```
+
+- **One seed, both chains, quantum-safely** (`light/hd.js`): BTC keys via hardened BIP84 (portable to
+  any standard wallet); QBT SLH-DSA keys via HKDF under a versioned domain label. The master seed is
+  symmetric material — never used as an EC key — so even a quantum adversary who recovers every BTC key
+  from its on-chain pubkeys (Shor) faces hash preimages toward the master, leaving the QBT branch its
+  full post-quantum security. The QBT derivation is self-consistent to this bot (no PQ HD standard
+  exists yet), so the phrase restores this wallet exactly but qbitd wouldn't derive the same addresses.
+- **Sealed at rest** (`light/seedstore.js`): AES-256-GCM under an scrypt-stretched password, fresh
+  salt/nonce, 0600; wrong password fails loudly (authenticated encryption). Password prompted on the
+  tty (no echo) or `LIGHT_PASSWORD` for headless runs.
+- **Self-signing wallet** (`light/lightwallet.js`): builds and signs its own funding txs (P2WPKH via
+  BIP143; QBT single-key p2mr leaves via SLH-DSA), change back to itself, RBF-signaling. It tracks its
+  own unconfirmed spend graph exactly — chain depth capped under Core's 25-ancestor policy, and funding
+  fees are **package-priced at build time** (the child's fee absorbs every unconfirmed ancestor's
+  shortfall from the next-block rate — no bumpfee needed, priced right the first time).
+- **Trade-offs**: liveness rides on the public APIs (rate limits, uptime) and your addresses/balances
+  are visible to them. Right for small makers; run your own nodes at size. Endpoints override via
+  `BTC_ESPLORA` / `QBIT_ESPLORA` (defaults: mempool.space, qbitmempool.robertclarke.com).
+
 ## Telegram control & monitoring
 
 Set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` and `run.js` starts a dedicated operator bot
