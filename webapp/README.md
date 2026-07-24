@@ -40,7 +40,8 @@ live price fills the other side, and one click routes into the normal non-custod
 backup → live swap) with the winning maker as counterparty. Quotes are limit-protected — if the price
 moves against you between quote and confirm, you're shown the fresh price and asked to accept it,
 never filled worse. Gated behind `window.QBIT_RFQ` (default off); the widget also hides itself when
-the coordinator has no makers configured. See `deploy/rfq-maker-trial.js` for the reference maker bot.
+the coordinator has no makers configured. The reference maker bot lives in `../maker-bot/`
+(`deploy/rfq-maker-trial.js` is a minimal regtest-lab variant).
 Fees are taker-pays: on a buy the fee is added on top of the BTC you send; on a sell your quoted BTC
 proceeds are already net of it (the widget says so under the receive panel).
 

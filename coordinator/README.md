@@ -73,7 +73,9 @@ QBT; sizes are `qbtSats`; `bid` = maker buys QBT (retail sells into it), `ask` =
   (a present side replaces, an absent side carries forward — `{}` is a pure keep-alive), refresh the
   TTL, and receive `matches`: takes awaiting this maker, each with the maker's swap token + role.
   Matches re-deliver every ping until the maker joins the swap (no ack protocol), then it fulfills
-  through the ordinary per-swap API like any party. `deploy/rfq-maker-trial.js` is the reference bot.
+  through the ordinary per-swap API like any party. The full reference bot lives in `../maker-bot/`
+  (two-sided quoting, inventory-aware sizing, wallet adapter); `webapp/deploy/rfq-maker-trial.js` is a
+  minimal regtest-lab variant.
 - `GET  /rfq` — public depth: best price + total size per side (`enabled:false` when no makers configured)
 - `GET  /rfq/quote?side=buy|sell&btcSats=|qbtSats=` — best single-maker fill for a size (rounding always
   favors the maker); `409` when live liquidity can't cover it

@@ -1,13 +1,13 @@
-# qbit-swap-mm (PRIVATE)
+# maker-bot
 
-Automated market-maker bots that fulfill BTC↔QBT atomic swaps on our behalf. **Private** — kept
-separate from the open-source stack.
+An autonomous market-maker bot that fulfills BTC↔QBT atomic swaps — the reference implementation of
+the maker side of this stack, and a starting point for running your own.
 
-It builds on the open-source pieces (which stay public):
-- the **client library** (`@qbit-swap/client`, the `qbit-otc/client` package) — key gen, HTLC
-  construction, P2MR/BIP143 sighash, WASM SLH-DSA + ECDSA signing;
+It builds on the sibling packages in this repo:
+- the **client library** (`@qbit-swap/client`, `../client`) — key gen, HTLC construction, P2MR/BIP143
+  sighash, WASM SLH-DSA + ECDSA signing;
 - the **coordinator HTTP API** — the maker joins/fulfills swaps through the same endpoints anyone else
-  would use.
+  would use (nothing here is privileged beyond the RFQ maker key).
 
 A maker bot adds the *decision layer* on top: which swaps to take, pricing, inventory/liquidity
 management, and running many swaps concurrently — signing everything client-side (non-custodial). It
@@ -57,8 +57,7 @@ Any wallet works, not just Core — implement the same six methods against a dif
 signer + Esplora, a custody API, hardware) and pass that object as `wallet`.
 
 ## Dev / running the tests
-Depends on the public client library and, for the e2e, the coordinator — both from a `qbit-otc`
-checkout **beside this repo** (`../qbit-otc`). Then:
+Uses the sibling `client/` and `coordinator/` packages in this repo:
 
 ```
 npm install

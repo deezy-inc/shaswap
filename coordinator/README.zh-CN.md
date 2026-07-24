@@ -70,7 +70,8 @@ RFQ 报价必须持续心跳维持：机器人一旦静默，其流动性将在 
 - `POST /rfq/maker`（请求头 `X-Maker-Key`）— 机器人的完整控制循环：（重新）声明 `{ bid?, ask? }`
  （出现的一侧被替换，缺席的一侧沿用——`{}` 为纯保活），刷新 TTL，并接收 `matches`：等待该做市方的
   成交，每条含做市方的 swap 令牌与角色。成交在做市方加入该 swap 之前每次心跳重复投递（无需确认协
-  议），随后像任何一方一样通过常规的单笔 swap API 履约。参考机器人见 `deploy/rfq-maker-trial.js`。
+  议），随后像任何一方一样通过常规的单笔 swap API 履约。完整参考机器人见 `../maker-bot/`（双边报价、
+  库存感知规模、钱包适配器）；`webapp/deploy/rfq-maker-trial.js` 是一个最小的 regtest 实验变体。
 - `GET  /rfq` — 公开深度：每侧最优价与总量（未配置做市方时 `enabled:false`）
 - `GET  /rfq/quote?side=buy|sell&btcSats=|qbtSats=` — 指定数量下的最优单一做市方成交（取整始终有利
   于做市方）；实时流动性不足时返回 `409`

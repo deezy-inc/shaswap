@@ -22,10 +22,8 @@ assumptions.)
 | `client/` | **Client library** (`@qbit-swap/client`) — HTLC construction + sighash + signing for both legs; browser + Node. WASM SLH-DSA signer bundled. | ✅ |
 | `coordinator/` | **Keyless coordinator** — Tier-Nolan state machine, reorg-safe confirmation gating, refund side-paths, SSE live feed, presence, pluggable chain backends. | ✅ |
 | `webapp/` | **Web app** — a wallet-agnostic, one-decision-per-screen wizard (EN / 简体中文). Ephemeral keys, in-page signing, plaintext backup file. | ✅ |
+| `maker-bot/` | **Market-maker bot** — reference maker for the RFQ instant-swap API: streams two-sided quotes, fulfills matches in either role, inventory-aware sizing, pluggable wallet adapter. | ✅ |
 | `reference/*.py` | Python reference implementation + regtest validation scripts. | ✅ |
-
-Market-maker bots live in a **separate private repo** (they consume `@qbit-swap/client` + the
-coordinator API).
 
 ## How a swap works
 

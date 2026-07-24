@@ -2,12 +2,12 @@
 // (test/mockchain.mjs) standing in for regtest nodes. Drives both terminal outcomes the bot must handle:
 //   1) COMPLETE — taker funds BTC, bot funds QBT, taker claims QBT (revealing the preimage), bot claims BTC.
 //   2) REFUNDED — taker funds BTC, bot funds QBT, taker walks; QBT timelock passes; bot refunds its QBT.
-// Requires the qbit-otc checkout beside this repo (imports the coordinator + client from ../../qbit-otc).
+// Runs against the sibling coordinator + client packages in this monorepo.
 //   Run:  node test/e2e.mock.mjs
 import { randomBytes } from "node:crypto";
 import { bytesToHex as hex, hexToBytes as bin } from "@noble/hashes/utils.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { slhDsaKeygen, slhDsaSign, compressedPub, p2mrSighash, serializeTx, P2MR_CONTROL_SINGLE_LEAF, addressToScriptPubKey, btcSpend } from "../../qbit-otc/client/index.js";
+import { slhDsaKeygen, slhDsaSign, compressedPub, p2mrSighash, serializeTx, P2MR_CONTROL_SINGLE_LEAF, addressToScriptPubKey, btcSpend } from "../../client/index.js";
 import { MakerBot } from "../maker-bot.js";
 import { installMocks } from "./mockchain.mjs";
 
@@ -21,8 +21,8 @@ process.env.RATE_MAX = "100000";   // the coordinator's per-IP POST rate limit i
 process.env.FEE_BPS = "200";
 process.env.FEE_XPUB = "xpub6BgBgsespWvERF3LHQu6CnqdvfEvtMcQjYrcRzx53QJjSxarj2afYWcLteoGVky7D3UKDP9QyrLprQ3VCECoY49yfdDEHGCtMMj92pReUsQ";
 process.env.RFQ_MAKER_KEYS = "mm-test:makerkey123";
-const { startServer } = await import("../../qbit-otc/coordinator/server.js");
-const { qbit, btc } = await import("../../qbit-otc/coordinator/chain.js");
+const { startServer } = await import("../../coordinator/server.js");
+const { qbit, btc } = await import("../../coordinator/chain.js");
 const mock = installMocks(qbit, btc);
 
 const PORT = 8799, BASE = `http://127.0.0.1:${PORT}`;

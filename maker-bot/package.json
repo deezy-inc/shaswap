@@ -1,19 +1,19 @@
 {
-  "name": "qbit-swap-mm",
+  "name": "@qbit-swap/maker-bot",
   "version": "1.0.0",
-  "description": "Automated market-maker bots for qbit-swap (PRIVATE)",
+  "description": "Autonomous market-maker bot for BTC<->QBT atomic swaps (reference maker for the qbit-swap RFQ API)",
   "main": "maker-bot.js",
   "scripts": {
     "test": "node test/e2e.mock.mjs"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "type": "module",
   "private": true,
   "dependencies": {
     "@noble/hashes": "^2.2.0",
-    "@qbit-swap/client": "file:../qbit-otc/client"
+    "@qbit-swap/client": "file:../client"
   },
   "exports": {
     ".": "./maker-bot.js"
