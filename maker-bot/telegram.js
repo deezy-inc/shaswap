@@ -9,7 +9,7 @@
 //   Env: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID (run.js starts this automatically when both are set).
 const fmt = (sats) => (sats / 1e8).toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
 
-export function startTelegram({ bot, wallet, quote, token, chatId, log = console.log, apiBase = "https://api.telegram.org" }) {
+export function startTelegram({ bot, wallet, quote, sanity = null, usd = null, token, chatId, log = console.log, apiBase = "https://api.telegram.org" }) {
   const api = async (method, body) => {
     const r = await fetch(`${apiBase}/bot${token}/${method}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const j = await r.json().catch(() => ({}));
@@ -32,19 +32,32 @@ export function startTelegram({ bot, wallet, quote, token, chatId, log = console
   // ── commands ───────────────────────────────────────────────────────────────────────────────────
   const sideLine = (s) => (s ? `${s.price} × ${fmt(s.qbtSats)} QBT` : "—");
   const quoteText = () => `Quote${quote.paused ? " (PAUSED)" : ""}:\n  bid ${sideLine(quote.bid)}\n  ask ${sideLine(quote.ask)}`;
-  const setSide = (side, arg) => {
-    const p = Number(arg);
-    if (!(p > 0)) return `usage: /${side} &lt;price BTC/QBT&gt; (or /${side} off)`;
+  // "/bid 0.0000011" — fixed price in BTC per QBT. "/bid $0.12" — a USD PEG: converted via live BTCUSD
+  // and re-priced so the dollar price follows BTC. Either form is checked against the market reference
+  // (the `sanity` hook run.js provides); append "force" to override: "/bid $0.5 force".
+  const setSide = async (side, arg) => {
+    const [raw, ...flags] = String(arg || "").trim().split(/\s+/);
+    const isUsd = raw.startsWith("$");
+    if (isUsd && !usd) return "USD quoting isn't wired up in this runner";
+    const n = Number(isUsd ? raw.slice(1) : raw);
+    if (!(n > 0)) return `usage: /${side} &lt;price BTC/QBT&gt; or /${side} $&lt;price USD/QBT&gt; (or /${side} off)`;
+    let p;
+    try { p = isUsd ? await usd.toBtc(n) : n; } catch (e) { return `⚠️ ${e.message}`; }
+    if (sanity && !flags.includes("force")) {
+      const s = await sanity(side, p);
+      if (!s.ok) return `🚫 ${s.msg}`;
+    }
     const size = quote[side]?.qbtSats ?? quote[side === "bid" ? "ask" : "bid"]?.qbtSats ?? 50e8;
     quote[side] = { price: p, qbtSats: size };
-    return `ok — ${side} → ${p}\n\n${quoteText()}`;
+    usd?.peg(side, isUsd ? n : null);            // $ form pegs the side to USD (repricer follows BTC); plain form un-pegs it
+    return `ok — ${side} → ${isUsd ? `$${n} (peg, currently ${p.toFixed(10)} BTC/QBT)` : p}\n\n${quoteText()}`;
   };
   const handlers = {
-    help: () => "Commands:\n/balances — spendable BTC + QBT\n/quote — current bid/ask/size\n/bid &lt;p&gt; · /ask &lt;p&gt; — set a price (or 'off' to drop the side)\n/size &lt;qbt&gt; — set per-side size\n/pause · /resume — stop/restart quoting\n/status — in-flight swaps",
+    help: () => "Commands:\n/balances — spendable BTC + QBT\n/quote — current bid/ask/size\n/bid &lt;p&gt; · /ask &lt;p&gt; — set a BTC/QBT price ($&lt;p&gt; = USD peg that follows BTC; 'off' drops the side; append 'force' to override the sanity check)\n/size &lt;qbt&gt; — set per-side size\n/pause · /resume — stop/restart quoting\n/status — in-flight swaps",
     balances: async () => { const b = await wallet.balances(); return `Spendable (incl. safe unconfirmed):\n  ${fmt(b.btcSats)} BTC\n  ${fmt(b.qbtSats)} QBT`; },
     quote: () => quoteText(),
-    bid: (arg) => (arg === "off" ? ((quote.bid = null), `ok — bid off\n\n${quoteText()}`) : setSide("bid", arg)),
-    ask: (arg) => (arg === "off" ? ((quote.ask = null), `ok — ask off\n\n${quoteText()}`) : setSide("ask", arg)),
+    bid: (arg) => (String(arg).trim() === "off" ? ((quote.bid = null), usd?.peg("bid", null), `ok — bid off\n\n${quoteText()}`) : setSide("bid", arg)),
+    ask: (arg) => (String(arg).trim() === "off" ? ((quote.ask = null), usd?.peg("ask", null), `ok — ask off\n\n${quoteText()}`) : setSide("ask", arg)),
     size: (arg) => {
       const q = Number(arg);
       if (!(q > 0)) return "usage: /size &lt;QBT per side&gt;";

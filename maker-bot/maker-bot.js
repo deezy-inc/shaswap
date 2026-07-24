@@ -409,3 +409,51 @@ function cryptoRandom(n) {
 }
 
 export { sha256 };   // re-export for adapters that need H-checks
+
+// ── price sanity guardrail ────────────────────────────────────────────────────────────────────────
+// A fat-fingered quote (0.019 for 0.19, a USD number where BTC/QBT belongs) is free money for the first
+// arbitrageur. Before a quote goes live — at startup and on every Telegram price change — compare it to
+// a REFERENCE price and refuse when it deviates more than `devPct` (%), unless explicitly overridden
+// (--force-price / FORCE_PRICE=1 / appending "force" to the Telegram command).
+// Reference, best first: median of the last settled swaps (coordinator /trades, if the public feed is
+// on) → the live maker book's mid (/rfq — other makers' standing prices). No reference (fresh market,
+// empty book) → the check is skipped with a warning; it can't invent a truth to compare against.
+export async function referencePrice(coordinatorUrl) {
+  const base = coordinatorUrl.replace(/\/$/, "");
+  try {
+    const r = await fetch(`${base}/trades?limit=20`);
+    if (r.ok) {
+      const prices = (await r.json()).map((t) => t.price).filter((p) => p > 0).sort((a, b) => a - b);
+      if (prices.length >= 3) return { price: prices[Math.floor(prices.length / 2)], source: `median of the last ${prices.length} settled swaps` };
+    }
+  } catch { /* trades feed off/unreachable */ }
+  try {
+    const r = await fetch(`${base}/rfq`);
+    if (r.ok) {
+      const d = await r.json();
+      const bid = d.sell?.price, ask = d.buy?.price;                 // book: sell side = best bid, buy side = best ask
+      if (bid > 0 && ask > 0) return { price: (bid + ask) / 2, source: "the live maker book's mid" };
+      if (bid > 0 || ask > 0) return { price: bid || ask, source: "the live maker book (one-sided)" };
+    }
+  } catch { /* rfq unreachable */ }
+  return null;
+}
+// Which sides of `quote` look wrong. Two independent guards:
+//   deviation — more than devPct off the reference price (both directions: one gives money away, the
+//               other is a dead quote — either way it's almost certainly a typo);
+//   ceiling   — above maxPrice outright, reference or not. With QBT around ~$0.12 (≈1e-6 BTC/QBT), a
+//               USD number typed into the BTC/QBT field ("0.12", "25000") lands orders of magnitude
+//               high and MUST be caught even on a fresh market with nothing to compare against.
+export function quoteIssues(quote, { ref = null, devPct = 30, maxPrice = 0.001 } = {}) {
+  const out = [];
+  for (const side of ["bid", "ask"]) {
+    const p = quote[side]?.price;
+    if (!(p > 0)) continue;
+    if (p > maxPrice) { out.push({ side, price: p, reason: "ceiling", maxPrice, losing: side === "bid" }); continue; }
+    if (ref > 0) {
+      const dev = Math.abs(p - ref) / ref * 100;
+      if (dev > devPct) out.push({ side, price: p, reason: "deviation", devPct: Math.round(dev), losing: side === "bid" ? p > ref : p < ref });
+    }
+  }
+  return out;
+}

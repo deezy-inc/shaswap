@@ -16,7 +16,8 @@
 //   --ping MS           (PING_MS, 10000)    quote refresh; must stay under the coordinator's 30s TTL
 //   --reserve-btc N / --reserve-qbt N       keep-back never quoted (whole coins; default 0)
 //   TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID   optional: control/monitor Telegram bot (telegram.js)
-import { MakerBot } from "./maker-bot.js";
+import { MakerBot, referencePrice, quoteIssues } from "./maker-bot.js";
+import { btcUsd, usdToBtcQbt, startUsdRepricer } from "./usd.js";
 import { rpcWallet, walletAdapter } from "./wallets.js";
 import { startTelegram } from "./telegram.js";
 import { fileKeystore } from "./keystore.js";
@@ -57,9 +58,19 @@ if (LIGHT && args.init) {
 
 const coordinatorUrl = opt("coordinator", "COORDINATOR_URL") || die("missing --coordinator (or COORDINATOR_URL)");
 const makerKey = opt("key", "MAKER_KEY") || die("missing --key (or MAKER_KEY)");
-const bid = num("bid", "BID", null), ask = num("ask", "ASK", null);
-if (bid == null && ask == null) die("set a fixed --bid and/or --ask (BTC per QBT)");
-if (bid != null && ask != null && bid >= ask) die(`--bid (${bid}) must be below --ask (${ask})`);
+// Prices: EITHER fixed BTC/QBT (--bid/--ask — mind the units, QBT≈$0.12 means ~0.000001) OR pegged USD
+// per QBT (--bid-usd/--ask-usd — converted via live BTCUSD and re-priced so your dollar price holds).
+const bidUsd = num("bid-usd", "BID_USD", null), askUsd = num("ask-usd", "ASK_USD", null);
+let bid = num("bid", "BID", null), ask = num("ask", "ASK", null);
+const pegs = { bid: bidUsd ?? null, ask: askUsd ?? null };
+if (pegs.bid != null || pegs.ask != null) {
+  const rate = await btcUsd().catch((e) => die(`USD quoting needs a BTCUSD rate: ${e.message}`));
+  if (pegs.bid != null) bid = usdToBtcQbt(pegs.bid, rate);
+  if (pegs.ask != null) ask = usdToBtcQbt(pegs.ask, rate);
+  console.log(`[run] BTCUSD ${rate} — ${pegs.bid != null ? `bid $${pegs.bid} → ${bid.toFixed(10)}` : ""}${pegs.bid != null && pegs.ask != null ? " · " : ""}${pegs.ask != null ? `ask $${pegs.ask} → ${ask.toFixed(10)}` : ""} BTC/QBT (repricing follows BTC)`);
+}
+if (bid == null && ask == null) die("set a price: --bid/--ask (BTC per QBT) or --bid-usd/--ask-usd (USD per QBT)");
+if (bid != null && ask != null && bid >= ask) die(`bid (${bid}) must be below ask (${ask})`);
 const sizeQbt = num("size", "SIZE_QBT", 50);
 
 let wallet;
@@ -99,8 +110,45 @@ const quote = {
   bid: bid != null ? { price: bid, qbtSats: Math.round(sizeQbt * 1e8) } : null,
   ask: ask != null ? { price: ask, qbtSats: Math.round(sizeQbt * 1e8) } : null,
 };
+
+// ── price sanity guardrail: refuse a quote that's way off, unless explicitly forced ───────────────
+// Two guards (maker-bot.js quoteIssues): deviation vs the market reference (recent settled swaps, else
+// the live book) beyond --price-dev / PRICE_DEV_PCT (30%), and an absolute CEILING --price-max /
+// PRICE_MAX (default 0.001 BTC/QBT ≈ $100+/QBT) that catches USD-magnitude numbers typed into the
+// BTC/QBT field even when there's no reference at all. Override: --force-price (or FORCE_PRICE=1).
+const devLimit = num("price-dev", "PRICE_DEV_PCT", 30);
+const maxPrice = num("price-max", "PRICE_MAX", 0.001);
+const forcePrice = !!args["force-price"] || process.env.FORCE_PRICE === "1";
+const describe = (o) => o.reason === "ceiling"
+  ? `${o.side} ${o.price} is above the ${o.maxPrice} BTC/QBT ceiling — that looks like a USD amount typed into the BTC/QBT field (use --${o.side}-usd to quote in USD)`
+  : `${o.side} ${o.price} is ${o.devPct}% off the reference`;
+const ref = await referencePrice(coordinatorUrl);
+{
+  const issues = quoteIssues(quote, { ref: ref?.price, devPct: devLimit, maxPrice });
+  if (issues.length && !forcePrice) {
+    die(`PRICE SANITY: ${issues.map(describe).join("; ")}${ref ? ` (reference ${ref.price.toFixed(10)} BTC/QBT — ${ref.source})` : ""}.` +
+        `${issues.some((o) => o.losing) ? " On the losing side, that quote is free money for the first arbitrageur." : ""}` +
+        `\nIf this price is intentional, rerun with --force-price (or FORCE_PRICE=1).`);
+  }
+  if (issues.length) console.log(`[run] ⚠ price sanity OVERRIDDEN (--force-price): ${issues.map(describe).join("; ")}`);
+  else console.log(`[run] price sanity ok${ref ? ` — reference ${ref.price.toFixed(10)} BTC/QBT (${ref.source}), tolerance ±${devLimit}%` : " (no reference; ceiling check only)"}`);
+}
+
+// USD pegs follow BTCUSD: re-price on an interval so a $-pegged side keeps its dollar price as BTC moves.
+if (pegs.bid != null || pegs.ask != null) startUsdRepricer({ quote, pegs });
+
+// Telegram price changes go through the same guardrail (append "force" to a command to override), and
+// "/bid $0.11" sets a USD PEG (following BTCUSD) instead of a fixed BTC price.
+const sanity = async (side, price) => {
+  const r = await referencePrice(coordinatorUrl);
+  const issues = quoteIssues({ [side]: { price } }, { ref: r?.price, devPct: devLimit, maxPrice });
+  if (!issues.length) return { ok: true };
+  const o = issues[0];
+  return { ok: false, msg: `${describe(o)}${r ? ` (reference ${r.price.toFixed(10)} — ${r.source})` : ""}.${o.losing ? " That side LOSES money as quoted." : ""}\nAppend "force" to override.` };
+};
+const usd = { toBtc: async (u) => usdToBtcQbt(u, await btcUsd()), peg: (side, u) => { pegs[side] = u; } };
 if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID)
-  startTelegram({ bot, wallet, quote, token: process.env.TELEGRAM_BOT_TOKEN, chatId: process.env.TELEGRAM_CHAT_ID });
+  startTelegram({ bot, wallet, quote, sanity, usd, token: process.env.TELEGRAM_BOT_TOKEN, chatId: process.env.TELEGRAM_CHAT_ID });
 
 const resumed = await bot.resumePending();   // pick up any swaps a previous run left mid-flight
 if (resumed) console.log(`[run] resumed ${resumed} in-flight swap(s) from ${keystore.dir}`);

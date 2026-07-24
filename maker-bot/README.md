@@ -112,12 +112,27 @@ default 20; ~80 kvB size guard) — so the bot keeps quoting through long unconf
 ```
 COORDINATOR_URL=https://qbitswap.com/coord MAKER_KEY=... \
 BTC_RPC_URL=http://user:pass@btc-node:8332 QBIT_RPC_URL=http://user:pass@qbit-node:8332 \
-node run.js --bid 0.19 --ask 0.21 --size 50
+node run.js --bid-usd 0.11 --ask-usd 0.13 --size 50
 ```
 
-Fixed prices in BTC per QBT, `--size` in QBT per side (a ceiling — inventory sizing trims it live).
-Quote one side only by passing just `--bid` or just `--ask`. All flags have env twins (see `run.js`'s
-header); connection config usually lives in env, prices on the command line.
+`--bid-usd/--ask-usd` quote in **USD per QBT** — the unit people actually think in — converted via the
+live BTCUSD rate and **re-priced on an interval so your dollar price follows BTC**. Prefer raw
+`--bid/--ask` only if you really mean BTC per QBT (mind the magnitude: QBT ≈ $0.12 is ≈ 0.0000010
+BTC/QBT). `--size` is QBT per side (a ceiling — inventory sizing trims it live). Quote one side only by
+passing just one. All flags have env twins (see `run.js`'s header).
+
+### Price sanity guardrail
+A fat-fingered price — above all, a USD number typed into the BTC/QBT field (`--bid 0.12` ≈ **$14,000
+per QBT**) — is free money for the first arbitrageur. Before any quote goes live (startup AND Telegram
+changes), it's checked two ways:
+- **deviation**: more than `PRICE_DEV_PCT` (30%) off the market reference — the median of recent
+  settled swaps (`/trades`), else the live maker book's mid (`/rfq`);
+- **ceiling**: above `PRICE_MAX` (0.001 BTC/QBT ≈ $100+/QBT) outright — catches USD-magnitude typos
+  even on a fresh market with no reference at all.
+
+A violation refuses to start (or rejects the Telegram command) with the reference price shown. If the
+price is genuinely intentional, override explicitly: `--force-price` / `FORCE_PRICE=1` on the CLI, or
+append `force` to the Telegram command (`/bid 0.5 force`).
 
 ## Light mode — no nodes, one seed phrase
 
@@ -157,12 +172,15 @@ maker touches (🤝 matched → 💰 funded → ✅ complete / ↩️ refunded /
 ```
 /balances          spendable BTC + QBT (incl. safe unconfirmed)
 /quote             current bid/ask/size
-/bid 0.185         set the bid price   (/bid off drops the side)
-/ask 0.22          set the ask price   (/ask off)
+/bid $0.11         set the bid as a USD PEG (follows BTCUSD)      /bid off drops the side
+/ask $0.13         set the ask as a USD peg                       /ask 0.0000011 = fixed BTC/QBT
 /size 25           QBT per side
 /pause  /resume    stop quoting (quote expires from the widget in ~30s) / restart
 /status            in-flight swaps
 ```
+
+Price changes run through the same sanity guardrail as startup — a way-off price is rejected with the
+market reference shown; append `force` to override (`/bid 0.5 force`).
 
 Price/size changes mutate the live quote and take effect on the next ping (≤ `--ping`, default 10s).
 Only messages from `TELEGRAM_CHAT_ID` are honored — any other chat gets silence.
