@@ -47,7 +47,9 @@ export class MakerBot {
     this.offers = new Map();   // offerId -> { makerToken, lot, handling }
     this.handling = new Set(); // swapIds already being fulfilled (RFQ matches re-deliver until we join)
     this.inflight = new Map(); // swapId -> { btcSats?|qbtSats? } committed but not yet funded (inventory reserve)
+    this.onEvent = null;       // optional hook: (type, data) — match | funded | completed | refunded | error (drives the Telegram bot)
   }
+  #ev(type, data) { try { this.onEvent?.(type, data); } catch { /* observer must never break the bot */ } }
 
   async #api(path, { token, method = "GET", body } = {}) {
     const r = await fetch(this.base + path, {
@@ -129,6 +131,9 @@ export class MakerBot {
     this.log(`[maker] RFQ market up: ${JSON.stringify(quote)} (ping ${pingMs}ms${this.wallet.balances ? ", inventory-sized" : ""})`);
     for (;;) {
       try {
+        // Paused (e.g. Telegram /pause): stop pinging so the standing quote expires within the TTL and
+        // liquidity drops from the widget. In-flight fulfillments keep running to completion.
+        if (quote.paused) { await sleep(pingMs); continue; }
         const sized = await this.#sizeQuote(quote, reserveBtcSats, reserveQbtSats);
         if (sized === null) { await sleep(pingMs); continue; }       // balance unreadable → don't quote blind
         const { matches = [] } = await this.#rfqPing(sized);
@@ -138,8 +143,9 @@ export class MakerBot {
           this.inflight.set(m.swapId, m.role === "alice" ? { btcSats: m.btcSats } : { qbtSats: m.qbtSats });   // reserve the leg we'll fund until it's funded
           const run = m.role === "alice" ? this.fulfillAsAlice({ id: m.swapId, token: m.token }) : this.fulfill({ id: m.swapId, token: m.token });
           this.log(`[maker] RFQ match ${m.swapId.slice(0, 8)} (${m.side} ${m.qbtSats / 1e8} QBT @ ${m.price}) — fulfilling as ${m.role}`);
-          run.then((r) => this.log(`[maker] RFQ ${m.swapId.slice(0, 8)} -> ${r.outcome}`))
-             .catch((e) => { this.log(`[maker] RFQ fulfill error: ${e.message}`); })
+          this.#ev("match", m);
+          run.then((r) => { this.log(`[maker] RFQ ${m.swapId.slice(0, 8)} -> ${r.outcome}`); this.#ev(r.outcome === "completed" ? "completed" : "refunded", { ...m, txid: r.txid }); })
+             .catch((e) => { this.log(`[maker] RFQ fulfill error: ${e.message}`); this.#ev("error", { ...m, error: e.message }); })
              .finally(() => { this.handling.delete(m.swapId); this.inflight.delete(m.swapId); });
         }
       } catch (e) { this.log(`[maker] RFQ ping error: ${e.message}`); }
@@ -215,6 +221,7 @@ export class MakerBot {
     const fundTxid = await this.wallet.fundQbit(ready.htlc.qbit.address, ready.terms.qbtSats);
     this.inflight.delete(id);   // funded — the node balance now reflects this spend, so drop the reserve (no double-count)
     this.log(`[maker] funded QBT HTLC ${ready.terms.qbtSats} sats (${fundTxid.slice(0, 12)})`);
+    this.#ev("funded", { swapId: id, leg: "qbit", sats: ready.terms.qbtSats, txid: fundTxid });
 
     // 5) race: either the taker claims QBT (revealing the preimage -> we claim BTC), or the QBT
     //    timelock expires with no claim (-> we refund our QBT). Whichever comes first.
@@ -303,6 +310,7 @@ export class MakerBot {
     const fundTxid = await this.wallet.fundBtc(ready.htlc.btc.address, btcAmt);
     this.inflight.delete(id);   // funded — the node balance now reflects this spend, so drop the reserve
     this.log(`[maker] funded BTC HTLC ${btcAmt} sats (${fundTxid.slice(0, 12)}); awaiting the taker's QBT`);
+    this.#ev("funded", { swapId: id, leg: "btc", sats: btcAmt, txid: fundTxid });
 
     // 4) race: the taker funds QBT and it matures -> we claim QBT (revealing the preimage); or the taker
     //    never funds and our BTC timelock passes -> we refund the BTC. We only ever reveal at CLAIMABLE,

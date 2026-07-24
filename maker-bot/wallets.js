@@ -46,9 +46,32 @@ async function fresh(call, kind) {
 // sats → a Core amount string with 8 dp (avoids float drift). sendtoaddress deposits EXACTLY this into
 // the HTLC; the wallet pays the network fee on top from its balance.
 const toAmount = (sats) => (sats / 1e8).toFixed(8);
-// Spendable balance in sats — Core's getbalances().mine.trusted (confirmed + own unconfirmed change),
-// which is what's actually available to fund a swap right now.
-const spendable = async (call) => Math.round(((await call("getbalances"))?.mine?.trusted || 0) * 1e8);
+
+// Spendable balance in sats, UNCONFIRMED-AWARE. The naive read (confirmed only) cripples a maker funded
+// with one big UTXO: the first swap spends it and leaves a large unconfirmed CHANGE output, which is
+// perfectly spendable — Core relays chained unconfirmed txs up to its mempool-chain policy (default 25
+// ancestors / 101 kvB ancestor size; exceeding it = "too-long-mempool-chain"). So we count an
+// unconfirmed UTXO as available iff its mempool ancestor chain leaves headroom for one more link,
+// with a safety margin under the policy caps (MAKER_MAX_ANCESTORS, default 20; ~80 kvB size guard).
+// Confirmed UTXOs always count. A wallet that can't answer getmempoolentry just skips that UTXO.
+const MAX_ANC = Number(process.env.MAKER_MAX_ANCESTORS || 20);        // < Core's 25-ancestor default
+const MAX_ANC_KVB = Number(process.env.MAKER_MAX_ANCESTOR_KVB || 80); // < Core's 101 kvB default
+async function spendable(call) {
+  const utxos = await call("listunspent", 0, 9999999);
+  let sats = 0;
+  const seen = new Map();   // txid -> mempool entry (many change outputs share a funding tx)
+  for (const u of utxos) {
+    if (u.spendable === false) continue;                              // watch-only / unsolvable
+    const v = Math.round(u.amount * 1e8);
+    if (u.confirmations > 0) { sats += v; continue; }
+    try {
+      const e = seen.get(u.txid) || (seen.set(u.txid, await call("getmempoolentry", u.txid)), seen.get(u.txid));
+      const sizeKvb = ((e.ancestorsize ?? e["ancestorsize"] ?? 0) / 1000);
+      if (e.ancestorcount < MAX_ANC && sizeKvb < MAX_ANC_KVB) sats += v;   // room for one more chained spend
+    } catch { /* evicted/foreign-unindexed — don't count what we can't verify */ }
+  }
+  return sats;
+}
 
 // Assemble the six-method adapter the bot expects from two node clients.
 export function walletAdapter({ btc, qbit, btcAddrType = "bech32" }) {

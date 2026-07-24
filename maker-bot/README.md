@@ -77,8 +77,47 @@ spendable balance − a keep-back reserve − in-flight commitments** (swaps pic
 The ask (it sells QBT) is capped by QBT on hand; the bid (it buys QBT with BTC) by BTC ÷ bid price. A
 side that can't cover the coordinator minimum is quoted as `null` (dropped) until inventory returns. So
 the sizes you pass to `serveRfq` are *ceilings*, and the bot never quotes depth it can't fund. This
-needs `wallet.balances() -> { btcSats, qbtSats }` (the Core adapter implements it via `getbalances`);
-without it, sizes stay static. Tune the keep-back with `serveRfq({ …, reserveBtcSats, reserveQbtSats })`.
+needs `wallet.balances() -> { btcSats, qbtSats }`; without it, sizes stay static. Tune the keep-back
+with `serveRfq({ …, reserveBtcSats, reserveQbtSats })`.
+
+**Unconfirmed change counts.** A maker funded with one big UTXO would look broke to a naive
+confirmed-only balance the moment its first swap leaves a large unconfirmed change output — but that
+change is spendable (Core happily chains unconfirmed spends up to its mempool policy: 25 ancestors /
+101 kvB). The Core adapter's `balances()` therefore counts an unconfirmed UTXO iff its mempool ancestor
+chain leaves headroom for one more spend, with a safety margin under the caps (`MAKER_MAX_ANCESTORS`,
+default 20; ~80 kvB size guard) — so the bot keeps quoting through long unconfirmed chains and stops
+*just before* it would hit `too-long-mempool-chain`, resuming automatically once a block confirms.
+
+## Quickstart — run a fixed-price maker with one command
+
+```
+COORDINATOR_URL=https://qbitswap.com/coord MAKER_KEY=... \
+BTC_RPC_URL=http://user:pass@btc-node:8332 QBIT_RPC_URL=http://user:pass@qbit-node:8332 \
+node run.js --bid 0.19 --ask 0.21 --size 50
+```
+
+Fixed prices in BTC per QBT, `--size` in QBT per side (a ceiling — inventory sizing trims it live).
+Quote one side only by passing just `--bid` or just `--ask`. All flags have env twins (see `run.js`'s
+header); connection config usually lives in env, prices on the command line.
+
+## Telegram control & monitoring
+
+Set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` and `run.js` starts a dedicated operator bot
+(`telegram.js`, zero deps, long-polling — no inbound ports). It pushes a notification for every swap the
+maker touches (🤝 matched → 💰 funded → ✅ complete / ↩️ refunded / ⚠️ error), and answers:
+
+```
+/balances          spendable BTC + QBT (incl. safe unconfirmed)
+/quote             current bid/ask/size
+/bid 0.185         set the bid price   (/bid off drops the side)
+/ask 0.22          set the ask price   (/ask off)
+/size 25           QBT per side
+/pause  /resume    stop quoting (quote expires from the widget in ~30s) / restart
+/status            in-flight swaps
+```
+
+Price/size changes mutate the live quote and take effect on the next ping (≤ `--ping`, default 10s).
+Only messages from `TELEGRAM_CHAT_ID` are honored — any other chat gets silence.
 
 ## Three ways to source swaps
 
