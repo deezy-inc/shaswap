@@ -1,0 +1,21 @@
+{
+  "name": "qbit-swap-mm",
+  "version": "1.0.0",
+  "description": "Automated market-maker bots for qbit-swap (PRIVATE)",
+  "main": "maker-bot.js",
+  "scripts": {
+    "test": "node test/e2e.mock.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@noble/hashes": "^2.2.0",
+    "@qbit-swap/client": "file:../qbit-otc/client"
+  },
+  "exports": {
+    ".": "./maker-bot.js"
+  }
+}
