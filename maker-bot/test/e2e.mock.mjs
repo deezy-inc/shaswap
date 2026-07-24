@@ -200,7 +200,80 @@ async function main() {
     ck(d3.buy.qbtSats === 5e9, "ask returns to full size once QBT inventory is restored");
   }
 
-  console.log(ok ? "\nPASS — MakerBot: buy + sell (Bob & Alice roles) + refunds + reject + inventory sizing, all against the live API" : "\nFAIL");
+  // ── 8) CRASH RESUME (Bob): keys persist before any action; a fresh process finishes the swap ────
+  // Bot A "crashes" at the worst moment — after joining, when funding throws — leaving only its
+  // keystore record. A brand-new bot instance resumes from that record with the SAME keys and drives
+  // the swap to COMPLETE. Without persistence those keys died with the process and the swap stranded.
+  console.log("\n=== scenario 8: crash before funding (Bob) → new process resumes from the keystore → COMPLETE ===");
+  {
+    const { rmSync } = await import("node:fs");
+    const { fileKeystore } = await import("../keystore.js");
+    const DIR = new URL("./_e2e_keys", import.meta.url).pathname;
+    rmSync(DIR, { recursive: true, force: true });
+    const ks = fileKeystore(DIR);
+    const crashWallet = { ...wallet, fundQbit: async () => { throw new Error("simulated crash at funding"); } };
+    const botA = new MakerBot({ coordinatorUrl: BASE, wallet: crashWallet, policy, pollMs: 200, keystore: ks, log: () => {} });
+
+    const { id, tokens, alice } = await setupSwap(20_000_000, 100_000_000);
+    const attempt = botA.fulfill({ id, token: tokens.bob }).catch((e) => e);   // joins, then dies at fund
+    await fundBtcAndRegister(id, tokens);
+    const crashErr = await attempt;
+    ck(/simulated crash/.test(crashErr?.message), "bot A crashed at the funding step (worst case: joined, keys committed, nothing funded)");
+    const rec = ks.list().find((r) => r.swapId === id);
+    ck(rec && rec.role === "bob" && rec.qbitSk?.length > 0, "keystore holds the swap's keys — written BEFORE any action");
+    const joinedPub = (await api(`/swaps/${id}`, { token: tokens.bob })).self?.qbitPub;
+
+    const botB = new MakerBot({ coordinatorUrl: BASE, wallet, policy, pollMs: 200, keystore: ks, log: (m) => console.log("   " + m) });
+    ck((await botB.resumePending()) === 1, "a fresh process resumes the open swap from the keystore");
+    await until(async () => (await api(`/swaps/${id}`, { token: tokens.alice })).funding?.qbit ? true : null);
+    mock.qbit.mine(2);
+    ck((await api(`/swaps/${id}`, { token: tokens.bob })).self?.qbitPub === joinedPub, "resume re-joined with the SAME keys (coordinator accepted the idempotent rejoin)");
+    await aliceClaimQbt(id, tokens, alice);
+    const final = await until(async () => { const v = await api(`/swaps/${id}`, { token: tokens.alice }); return v.state === "COMPLETE" ? v : null; });
+    ck(final.state === "COMPLETE", "resumed bot funded, watched the reveal, and claimed → COMPLETE");
+    await until(async () => (ks.list().length === 0 ? true : null));
+    ck(ks.list().length === 0, "settled swap retired from the keystore (markDone)");
+    rmSync(DIR, { recursive: true, force: true });
+  }
+
+  // ── 9) CRASH RESUME (Alice): the persisted record includes the SECRET — resume funds BTC and
+  //      completes the sell-side swap it initiated.
+  console.log("\n=== scenario 9: crash before funding (Alice) → resume with the persisted secret → COMPLETE ===");
+  {
+    const { rmSync } = await import("node:fs");
+    const { fileKeystore } = await import("../keystore.js");
+    const DIR = new URL("./_e2e_keys2", import.meta.url).pathname;
+    rmSync(DIR, { recursive: true, force: true });
+    const ks = fileKeystore(DIR);
+    const crashWallet = { ...wallet, fundBtc: async () => { throw new Error("simulated crash at funding"); } };
+    const botA = new MakerBot({ coordinatorUrl: BASE, wallet: crashWallet, policy, pollMs: 200, keystore: ks, log: () => {} });
+
+    const { id, tokens } = await api("/swaps", { method: "POST", body: { btcSats: 20_000_000, qbtSats: 100_000_000, securityLevel: "high" } }).then((r) => ({ id: r.id, tokens: r.tokens }));
+    const bobPriv = randomBytes(32), bobBtcSpk = randomBytes(22);
+    await api(`/swaps/${id}/party`, { token: tokens.bob, method: "POST", body: { qbitPub: hex((await slhDsaKeygen(randomBytes(128))).pk), btcPub: hex(compressedPub(bobPriv)), btcDest: "bc1bob", qbitDest: "qbt1bob" } });
+    const crashErr = await botA.fulfillAsAlice({ id, token: tokens.alice }).catch((e) => e);
+    ck(/simulated crash/.test(crashErr?.message), "Alice-side bot crashed at BTC funding");
+    ck(ks.list()[0]?.secret?.length === 32, "the keystore record carries the PREIMAGE SECRET (losing it would make the swap refund-only)");
+
+    const botB = new MakerBot({ coordinatorUrl: BASE, wallet, policy, pollMs: 200, keystore: ks, log: (m) => console.log("   " + m) });
+    await botB.resumePending();
+    const v1 = await until(async () => { const s = await api(`/swaps/${id}`, { token: tokens.bob }); return s.funding?.btc ? s : null; });
+    mock.btc.register(v1.htlc.btc.address, v1.htlc.btc.spk); mock.btc.mine(2);
+    const cleared = await until(async () => { const s = await api(`/swaps/${id}`, { token: tokens.bob }); return s.fundGate?.cleared ? s : null; });
+    mock.qbit.fundSpk(cleared.htlc.qbit.spk, cleared.terms.qbtSats); mock.qbit.mine(2);   // retail funds QBT
+    const revealed = await until(async () => { const s = await api(`/swaps/${id}`, { token: tokens.bob }); return s.preimage ? s : null; });
+    ck(!!revealed.preimage, "resumed Alice claimed the QBT using the persisted secret (preimage revealed)");
+    const f = revealed.funding.btc, ws = bin(revealed.htlc.btc.witnessScript);
+    const btx = btcSpend({ prevTxidLE: bin(f.txid).reverse(), vout: f.vout, amount: f.amountSats, ws, priv: bobPriv, destSpk: bobBtcSpk, outVal: f.amountSats - 5000, branch: "claim", preimage: bin(revealed.preimage) });
+    await api(`/swaps/${id}/broadcast`, { token: tokens.bob, method: "POST", body: { leg: "btc", kind: "claim", tx: hex(btx) } }); mock.btc.mine(1);
+    const final = await until(async () => { const s = await api(`/swaps/${id}`, { token: tokens.bob }); return s.state === "COMPLETE" ? s : null; });
+    ck(final.state === "COMPLETE", "Alice-side resume settled COMPLETE");
+    await until(async () => (ks.list().length === 0 ? true : null));
+    ck(ks.list().length === 0, "settled Alice swap retired from the keystore");
+    rmSync(DIR, { recursive: true, force: true });
+  }
+
+  console.log(ok ? "\nPASS — MakerBot: buy + sell (Bob & Alice roles) + refunds + reject + inventory sizing + crash resume, all against the live API" : "\nFAIL");
   process.exit(ok ? 0 : 1);
 }
 main().catch((e) => { console.error("ERROR:", e.stack || e.message); process.exit(1); });

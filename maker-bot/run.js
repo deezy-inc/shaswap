@@ -19,6 +19,7 @@
 import { MakerBot } from "./maker-bot.js";
 import { rpcWallet, walletAdapter } from "./wallets.js";
 import { startTelegram } from "./telegram.js";
+import { fileKeystore } from "./keystore.js";
 
 // ── tiny arg parser: --a-b v → args["a-b"]=v; bare --flag → true ─────────────────────────────────
 const args = {};
@@ -46,8 +47,9 @@ const wallet = walletAdapter({
   btc:  rpcWallet(btcRpc, process.env.BTC_WALLET || "maker"),
   qbit: rpcWallet(qbitRpc, process.env.QBIT_WALLET || "maker"),
 });
+const keystore = fileKeystore();   // durable per-swap keys (MAKER_KEY_DIR, default ./maker-keys) — crash-safe
 const bot = new MakerBot({
-  coordinatorUrl, makerKey, wallet,
+  coordinatorUrl, makerKey, wallet, keystore,
   policy: { minRate: num("min-rate", "MIN_RATE", 0.0000001), maxQbtSats: Math.round(num("max-qbt", "MAX_QBT", sizeQbt) * 1e8) },
 });
 
@@ -63,6 +65,9 @@ const quote = {
 };
 if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID)
   startTelegram({ bot, wallet, quote, token: process.env.TELEGRAM_BOT_TOKEN, chatId: process.env.TELEGRAM_CHAT_ID });
+
+const resumed = await bot.resumePending();   // pick up any swaps a previous run left mid-flight
+if (resumed) console.log(`[run] resumed ${resumed} in-flight swap(s) from ${keystore.dir}`);
 
 console.log(`[run] quoting ${quote.bid ? `bid ${quote.bid.price}` : "(no bid)"} / ${quote.ask ? `ask ${quote.ask.price}` : "(no ask)"} BTC/QBT · ${sizeQbt} QBT per side`);
 await bot.serveRfq({

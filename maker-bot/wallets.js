@@ -73,6 +73,41 @@ async function spendable(call) {
   return sats;
 }
 
+// ── ancestor-aware (package) fee selection ───────────────────────────────────────────────────────
+// When a funding tx spends unconfirmed change, miners judge it by the whole ancestor PACKAGE's feerate,
+// not the child's own — so a child paying "next-block" on its own vsize still stalls if low-fee
+// ancestors drag the package under the target (and in a rising market, old ancestors always do). After
+// sending, read the chain's real economics from getmempoolentry (fees.ancestor / ancestorsize INCLUDE
+// the child) and, if the package rate is short of next-block, RBF-bump the child so its fee covers the
+// whole chain's deficit:  childFee' = ceil(target × ancestorSize) − (ancestorFees − childFee).
+// Capped at MAKER_MAX_FEERATE (default 500 sat/vB) so a weird mempool can't drain the wallet; any
+// failure (no mempool entry — confirmed parents; bumpfee unavailable) keeps the original tx. An RBF'd
+// funding gets a new txid, which is fine: the coordinator re-derives an unconfirmed deposit from
+// findOutput each poll, tracking replacements.
+const MAX_FEERATE = Number(process.env.MAKER_MAX_FEERATE || 500);   // sat/vB cap on the bumped child
+async function nextBlockRate(call) {
+  try {
+    const r = await call("estimatesmartfee", 2, "CONSERVATIVE");     // BTC/kvB → sat/vB
+    if (r?.feerate > 0) return Math.max(1, Math.ceil(r.feerate * 1e5));
+  } catch { /* estimator cold */ }
+  return 1;                                                          // uncongested / regtest floor
+}
+async function fundPackageAware(call, address, sats) {
+  const txid = await call("sendtoaddress", address, toAmount(sats));
+  try {
+    const e = await call("getmempoolentry", txid);                   // throws if it confirmed instantly / all-confirmed parents edge
+    if (!(e?.ancestorcount > 1)) return txid;                        // no unconfirmed ancestors → child-only economics are correct
+    const target = await nextBlockRate(call);
+    const S = e.ancestorsize, F = Math.round(e.fees.ancestor * 1e8); // whole-chain vsize + fees (child included)
+    if (F >= target * S) return txid;                                // package already clears next-block
+    const childFee = Math.round(e.fees.base * 1e8);
+    const neededChild = Math.ceil(target * S) - (F - childFee);      // child absorbs the ancestors' deficit
+    const rate = Math.min(MAX_FEERATE, Math.max(1, Math.ceil(neededChild / e.vsize)));
+    const b = await call("bumpfee", txid, { fee_rate: rate });
+    return b?.txid || txid;
+  } catch { return txid; }                                           // best-effort: never fail the funding over the bump
+}
+
 // Assemble the six-method adapter the bot expects from two node clients.
 export function walletAdapter({ btc, qbit, btcAddrType = "bech32" }) {
   return {
@@ -80,8 +115,8 @@ export function walletAdapter({ btc, qbit, btcAddrType = "bech32" }) {
     qbitHeight: () => qbit("getblockcount"),
     newBtc:     () => fresh(btc, btcAddrType),   // segwit v0 receive/refund sink
     newQbit:    () => fresh(qbit, null),          // qbitd's default (post-quantum) address type
-    fundBtc:  (address, sats) => btc("sendtoaddress", address, toAmount(sats)),
-    fundQbit: (address, sats) => qbit("sendtoaddress", address, toAmount(sats)),
+    fundBtc:  (address, sats) => fundPackageAware(btc, address, sats),
+    fundQbit: (address, sats) => fundPackageAware(qbit, address, sats),
     // Live spendable inventory — serveRfq sizes each quote to this (minus in-flight + your keep-back).
     balances: async () => { const [btcSats, qbtSats] = await Promise.all([spendable(btc), spendable(qbit)]); return { btcSats, qbtSats }; },
   };

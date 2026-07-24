@@ -56,6 +56,25 @@ use a dedicated RPC user. Nothing else is needed: the bot exports no keys and th
 Any wallet works, not just Core — implement the same six methods against a different backend (an HD
 signer + Esplora, a custody API, hardware) and pass that object as `wallet`.
 
+**Package-aware funding fees.** When a funding tx spends unconfirmed ancestors, miners judge the whole
+ancestor *package's* feerate — a child paying "next-block" on its own vsize still stalls behind low-fee
+ancestors, especially in a rising market. After each send the Core adapter reads the chain's real
+economics (`getmempoolentry`: ancestor fees/size include the child) and, if the package is short of the
+next-block target, RBF-bumps the child to absorb the whole deficit
+(`childFee' = target×ancestorSize − otherAncestorFees`), capped at `MAKER_MAX_FEERATE` (500 sat/vB).
+The coordinator tracks an RBF'd unconfirmed deposit automatically.
+
+## Swap-key safety (crash recovery)
+The bot signs with ephemeral per-swap keys. Held only in memory they'd die with the process — stranding
+the QBT it locked (no refund key), the BTC it's owed (no claim key), and on the Alice side the preimage
+secret itself. So every swap's material (keys, secret, dests, swap token) is written to a durable
+keystore **before the bot takes any action**: one JSON file per swap under `MAKER_KEY_DIR` (default
+`./maker-keys`), `0600` in a `0700` dir, atomic writes. On startup `run.js` calls `resumePending()`,
+which re-enters every open swap idempotently (skips the join if already joined — verifying the stored
+keys match the joined party — skips already-funded legs, and picks up the claim/refund watch where it
+left off). Settled swaps retire to `.done.json`. The keystore sits on the same trust boundary as the
+wallet RPC credentials in env: protect the machine; back up the directory if you back up anything.
+
 ## Dev / running the tests
 Uses the sibling `client/` and `coordinator/` packages in this repo:
 

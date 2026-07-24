@@ -51,6 +51,49 @@ ck((await w.balances()).btcSats === 420_000_000, "single unconfirmed change outp
 ENTRIES.chg1 = { ancestorcount: 20, ancestorsize: 30_000 };
 ck((await w.balances()).btcSats === 0, "at the ancestor-count margin the UTXO stops counting (avoids too-long-mempool-chain)");
 
+// ── ancestor-aware (package) fee selection on funding ────────────────────────────────────────────
+// A funding tx spending low-fee unconfirmed ancestors must be bumped so the whole PACKAGE clears at the
+// next-block rate — childFee' = ceil(target×ancestorSize) − (ancestorFees − childFee) — or miners never
+// pick it up in a rising market. Cases: deficit → bumpfee with the computed rate; package already at
+// target → no bump; no unconfirmed ancestors → no bump.
+let entry = null, bumped = null, sends = 0;
+const ENTRY_OK = () => entry;
+Object.assign(ENTRIES, {});   // reuse the server; extend its method handling below
+srv.removeAllListeners("request");
+srv.on("request", (req, res) => {
+  let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => {
+    const { method, params } = JSON.parse(b);
+    const R = (result) => res.end(JSON.stringify({ result, error: null }));
+    if (method === "sendtoaddress") { sends++; return R("fundtx" + sends); }
+    if (method === "getmempoolentry") { const e = ENTRY_OK(); return e ? R(e) : res.end(JSON.stringify({ error: { message: "not in mempool" } })); }
+    if (method === "estimatesmartfee") return R({ feerate: 0.0002 });          // 20 sat/vB next-block
+    if (method === "bumpfee") { bumped = params[1]; return R({ txid: "bumped" + sends }); }
+    res.end(JSON.stringify({ error: { message: "unknown " + method } }));
+  });
+});
+
+// deficit case: chain of 3, 2000 vB total paying 10,000 sats (5 sat/vB) vs 20 sat/vB target.
+// child: 200 vB / 2,000 sats → childFee' = 20×2000 − (10000−2000) = 32,000 → rate 160 sat/vB.
+entry = { ancestorcount: 3, ancestorsize: 2000, vsize: 200, fees: { ancestor: 0.0001, base: 0.00002 } };
+let txid = await w.fundBtc("bc1qhtlc", 1_000_000);
+ck(bumped?.fee_rate === 160, `low-fee ancestors → child bumped to cover the package deficit (${bumped?.fee_rate} sat/vB, expected 160)`);
+ck(txid.startsWith("bumped"), "funding returns the replacement txid after the bump");
+
+// package already ≥ target → untouched
+bumped = null; entry = { ancestorcount: 3, ancestorsize: 2000, vsize: 200, fees: { ancestor: 0.00045, base: 0.00004 } };   // 22.5 sat/vB
+txid = await w.fundBtc("bc1qhtlc", 1_000_000);
+ck(bumped === null && txid.startsWith("fundtx"), "package already clears next-block → no bump");
+
+// no unconfirmed ancestors → child-only economics, untouched
+bumped = null; entry = { ancestorcount: 1, ancestorsize: 200, vsize: 200, fees: { ancestor: 0.000003, base: 0.000003 } };
+txid = await w.fundBtc("bc1qhtlc", 1_000_000);
+ck(bumped === null, "no unconfirmed ancestors → no bump (child-only feerate is the real feerate)");
+
+// absurd deficit → capped at MAKER_MAX_FEERATE (default 500)
+bumped = null; entry = { ancestorcount: 24, ancestorsize: 90_000, vsize: 150, fees: { ancestor: 0.0001, base: 0.00001 } };
+await w.fundBtc("bc1qhtlc", 1_000_000);
+ck(bumped?.fee_rate === 500, `pathological deficit is capped at MAKER_MAX_FEERATE (${bumped?.fee_rate})`);
+
 srv.close();
-console.log(ok ? "\nPASS — spendable balance chains unconfirmed change safely up to the mempool limits" : "\nFAIL");
+console.log(ok ? "\nPASS — spendable balance + package-aware funding fees both behave at the mempool-chain edges" : "\nFAIL");
 process.exit(ok ? 0 : 1);

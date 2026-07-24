@@ -36,7 +36,7 @@ const DUST = 546;
 
 export class MakerBot {
   /** @param {{coordinatorUrl:string, wallet:Wallet, policy:Policy, pollMs?:number, feeSats?:{qbit:number,btc:number}, log?:Function}} cfg */
-  constructor({ coordinatorUrl, wallet, policy, pollMs = 2000, feeSats = { qbit: 100000, btc: 5000 }, makerKey = null, log = console.log }) {
+  constructor({ coordinatorUrl, wallet, policy, pollMs = 2000, feeSats = { qbit: 100000, btc: 5000 }, makerKey = null, keystore = null, log = console.log }) {
     this.base = coordinatorUrl.replace(/\/$/, "");
     this.wallet = wallet;
     this.policy = policy;
@@ -48,6 +48,7 @@ export class MakerBot {
     this.handling = new Set(); // swapIds already being fulfilled (RFQ matches re-deliver until we join)
     this.inflight = new Map(); // swapId -> { btcSats?|qbtSats? } committed but not yet funded (inventory reserve)
     this.onEvent = null;       // optional hook: (type, data) — match | funded | completed | refunded | error (drives the Telegram bot)
+    this.keystore = keystore;  // optional durable per-swap key store (keystore.js) — crash-safe claims/refunds + resumePending()
   }
   #ev(type, data) { try { this.onEvent?.(type, data); } catch { /* observer must never break the bot */ } }
 
@@ -195,16 +196,26 @@ export class MakerBot {
     return this.fulfill({ id, token });
   }
 
-  async fulfill({ id, token }) {
-    // 1) ephemeral, per-swap keys — nothing persists past this swap.
-    const qbit = await slhDsaKeygen(cryptoRandom(128));
-    const btcPriv = cryptoRandom(32);
+  // `saved` = a keystore record from a previous run (crash recovery): reuse its keys instead of fresh
+  // ones. Every step is idempotent under resume — re-joining with the SAME keys is allowed by the
+  // coordinator, and funding is skipped when the leg is already funded on-chain.
+  async fulfill({ id, token, saved = null }) {
+    // 1) ephemeral, per-swap keys — persisted to the keystore BEFORE any action, so a crash never
+    //    strands our ability to claim the BTC or refund the QBT we lock below.
+    const qbit = saved ? { pk: saved.qbitPk, sk: saved.qbitSk } : await slhDsaKeygen(cryptoRandom(128));
+    const btcPriv = saved ? saved.btcPriv : cryptoRandom(32);
     const btcPub = compressedPub(btcPriv);
-    const qbitDest = await this.wallet.newQbit();     // QBT refund sink (if taker aborts)
-    const btcDest = await this.wallet.newBtc();       // where we receive BTC
+    const qbitDest = saved ? saved.qbitDest : await this.wallet.newQbit();     // QBT refund sink (if taker aborts)
+    const btcDest = saved ? saved.btcDest : await this.wallet.newBtc();        // where we receive BTC
+    if (!saved) this.keystore?.save({ swapId: id, token, role: "bob", qbitPk: qbit.pk, qbitSk: qbit.sk, btcPriv, btcDest, qbitDest, at: Date.now() });
 
-    // 2) join as Bob (no H — the taker owns the secret).
-    await this.#api(`/swaps/${id}/party`, {
+    // 2) join as Bob (no H — the taker owns the secret). On resume, the join may already be on record —
+    // and once a deposit exists the coordinator locks party data — so only submit when our slot is
+    // empty, and hard-stop if the slot holds keys that aren't ours (a mismatched keystore record could
+    // otherwise watch a swap it can't actually sign for).
+    const pre = saved ? await this.#api(`/swaps/${id}`, { token }) : null;
+    if (pre?.self && pre.self.qbitPub !== hex(qbit.pk)) throw new Error("keystore keys don't match this swap's joined party — refusing to resume");
+    if (!pre?.self) await this.#api(`/swaps/${id}/party`, {
       token, method: "POST",
       body: { qbitPub: hex(qbit.pk), btcPub: hex(btcPub), btcDest: btcDest.address, qbitDest: qbitDest.address },
     });
@@ -217,22 +228,26 @@ export class MakerBot {
     const funded = await this.#poll(`/swaps/${id}`, token, (v) => v.funding?.btc);
     this.log(`[maker] taker's BTC HTLC funded (${funded.funding.btc.txid.slice(0, 12)}); locking QBT`);
 
-    // 4) fund our QBT leg.
-    const fundTxid = await this.wallet.fundQbit(ready.htlc.qbit.address, ready.terms.qbtSats);
+    // 4) fund our QBT leg — unless a previous run already did (resume-idempotency).
+    if (!funded.funding?.qbit) {
+      const fundTxid = await this.wallet.fundQbit(ready.htlc.qbit.address, ready.terms.qbtSats);
+      this.log(`[maker] funded QBT HTLC ${ready.terms.qbtSats} sats (${fundTxid.slice(0, 12)})`);
+      this.#ev("funded", { swapId: id, leg: "qbit", sats: ready.terms.qbtSats, txid: fundTxid });
+    } else this.log(`[maker] QBT leg already funded (resume) — watching for the reveal`);
     this.inflight.delete(id);   // funded — the node balance now reflects this spend, so drop the reserve (no double-count)
-    this.log(`[maker] funded QBT HTLC ${ready.terms.qbtSats} sats (${fundTxid.slice(0, 12)})`);
-    this.#ev("funded", { swapId: id, leg: "qbit", sats: ready.terms.qbtSats, txid: fundTxid });
 
     // 5) race: either the taker claims QBT (revealing the preimage -> we claim BTC), or the QBT
     //    timelock expires with no claim (-> we refund our QBT). Whichever comes first.
     while (true) {
       const v = await this.#api(`/swaps/${id}`, { token });
-      if (v.preimage) return this.#claimBtc({ id, token, v, btcPriv, destSpk: btcDest.spk });
+      if (v.preimage) return this.#done(id, await this.#claimBtc({ id, token, v, btcPriv, destSpk: btcDest.spk }));
       const h = await this.wallet.qbitHeight();
-      if (v.funding?.qbit && h >= v.locktimes.qbit) return this.#refundQbit({ id, token, v, qbit, destSpk: qbitDest.spk });
+      if (v.funding?.qbit && h >= v.locktimes.qbit) return this.#done(id, await this.#refundQbit({ id, token, v, qbit, destSpk: qbitDest.spk }));
+      if (["COMPLETE", "REFUNDED", "ABORTED", "CANCELED"].includes(v.state)) return this.#done(id, { accepted: true, outcome: v.state.toLowerCase() });   // settled out from under us (e.g. resumed after our claim landed)
       await sleep(this.pollMs);
     }
   }
+  #done(id, result) { this.keystore?.markDone(id); return result; }
 
   // Taker revealed the preimage on the QBT chain; sweep the BTC HTLC to our sink.
   //
@@ -288,40 +303,66 @@ export class MakerBot {
   // once the coordinator says it's safe (CLAIMABLE). If the taker never funds, its BTC stays refundable
   // and it reclaims it after the timelock. Funding BTC before the taker commits is inherent to being the
   // buyer; the exposure is bounded and always recoverable (never lost), which is the Tier-Nolan guarantee.
-  async fulfillAsAlice({ id, token }) {
-    // 1) ephemeral, per-swap keys — INCLUDING the secret we (the initiator) commit to.
-    const qbit = await slhDsaKeygen(cryptoRandom(128));
-    const btcPriv = cryptoRandom(32), btcPub = compressedPub(btcPriv);
-    const secret = cryptoRandom(32), H = sha256(secret);
-    const qbitDest = await this.wallet.newQbit();     // where we receive the QBT we're buying
-    const btcDest = await this.wallet.newBtc();       // BTC refund sink (if the taker never funds)
+  async fulfillAsAlice({ id, token, saved = null }) {
+    // 1) ephemeral, per-swap keys — INCLUDING the secret we (the initiator) commit to. All persisted to
+    //    the keystore BEFORE any action: losing the secret would make our locked BTC refund-only; losing
+    //    the keys would strand it entirely.
+    const qbit = saved ? { pk: saved.qbitPk, sk: saved.qbitSk } : await slhDsaKeygen(cryptoRandom(128));
+    const btcPriv = saved ? saved.btcPriv : cryptoRandom(32), btcPub = compressedPub(btcPriv);
+    const secret = saved ? saved.secret : cryptoRandom(32), H = sha256(secret);
+    const qbitDest = saved ? saved.qbitDest : await this.wallet.newQbit();     // where we receive the QBT we're buying
+    const btcDest = saved ? saved.btcDest : await this.wallet.newBtc();        // BTC refund sink (if the taker never funds)
+    if (!saved) this.keystore?.save({ swapId: id, token, role: "alice", qbitPk: qbit.pk, qbitSk: qbit.sk, btcPriv, secret, btcDest, qbitDest, at: Date.now() });
 
-    // 2) join as Alice WITH H (only the initiator commits the hash).
-    await this.#api(`/swaps/${id}/party`, {
+    // 2) join as Alice WITH H (only the initiator commits the hash). On resume, only submit if our slot
+    // is empty (party data locks once a deposit exists), and never proceed on a key mismatch.
+    const pre = saved ? await this.#api(`/swaps/${id}`, { token }) : null;
+    if (pre?.self && pre.self.qbitPub !== hex(qbit.pk)) throw new Error("keystore keys don't match this swap's joined party — refusing to resume");
+    if (!pre?.self) await this.#api(`/swaps/${id}/party`, {
       token, method: "POST",
       body: { qbitPub: hex(qbit.pk), btcPub: hex(btcPub), btcDest: btcDest.address, qbitDest: qbitDest.address, H: hex(H) },
     });
     const ready = await this.#poll(`/swaps/${id}`, token, (v) => v.state !== "CREATED" && v.htlc);
     this.log(`[maker] joined swap ${id.slice(0, 12)} as Alice -> ${ready.state}; BTC HTLC ${ready.htlc.btc.address}`);
 
-    // 3) fund our BTC leg FIRST (the initiator funds unconditionally; it stays refundable until we reveal).
-    //    The buyer funds the coordinator fee on top of terms.btcSats — so does the bot as buyer.
-    const btcAmt = ready.terms.btcSats + (ready.fee?.sats || 0);
-    const fundTxid = await this.wallet.fundBtc(ready.htlc.btc.address, btcAmt);
+    // 3) fund our BTC leg FIRST (the initiator funds unconditionally; it stays refundable until we
+    //    reveal) — unless a previous run already did (resume-idempotency). The buyer funds the
+    //    coordinator fee on top of terms.btcSats — so does the bot as buyer.
+    if (!ready.funding?.btc) {
+      const btcAmt = ready.terms.btcSats + (ready.fee?.sats || 0);
+      const fundTxid = await this.wallet.fundBtc(ready.htlc.btc.address, btcAmt);
+      this.log(`[maker] funded BTC HTLC ${btcAmt} sats (${fundTxid.slice(0, 12)}); awaiting the taker's QBT`);
+      this.#ev("funded", { swapId: id, leg: "btc", sats: btcAmt, txid: fundTxid });
+    } else this.log(`[maker] BTC leg already funded (resume) — awaiting the taker's QBT`);
     this.inflight.delete(id);   // funded — the node balance now reflects this spend, so drop the reserve
-    this.log(`[maker] funded BTC HTLC ${btcAmt} sats (${fundTxid.slice(0, 12)}); awaiting the taker's QBT`);
-    this.#ev("funded", { swapId: id, leg: "btc", sats: btcAmt, txid: fundTxid });
 
     // 4) race: the taker funds QBT and it matures -> we claim QBT (revealing the preimage); or the taker
     //    never funds and our BTC timelock passes -> we refund the BTC. We only ever reveal at CLAIMABLE,
     //    which the coordinator sets only once BOTH legs are buried and it's still safe (never too late).
     while (true) {
       const v = await this.#api(`/swaps/${id}`, { token });
-      if (v.state === "CLAIMABLE" && v.funding?.qbit) return this.#claimQbit({ id, token, v, qbit, secret, destSpk: qbitDest.spk });
+      if (v.state === "CLAIMABLE" && v.funding?.qbit) return this.#done(id, await this.#claimQbit({ id, token, v, qbit, secret, destSpk: qbitDest.spk }));
       const h = await this.wallet.btcHeight();
-      if (v.funding?.btc && !v.funding.btc.spent && !v.preimage && h >= v.locktimes.btc) return this.#refundBtc({ id, token, v, btcPriv, destSpk: btcDest.spk });
+      if (v.funding?.btc && !v.funding.btc.spent && !v.preimage && h >= v.locktimes.btc) return this.#done(id, await this.#refundBtc({ id, token, v, btcPriv, destSpk: btcDest.spk }));
+      if (["COMPLETE", "REFUNDED", "ABORTED", "CANCELED"].includes(v.state)) return this.#done(id, { accepted: true, outcome: v.state.toLowerCase() });
       await sleep(this.pollMs);
     }
+  }
+
+  // Resume swaps left OPEN in the keystore by a previous run (crash recovery). Idempotent end to end:
+  // re-join with the saved keys, skip already-funded legs, and pick up the watch loop where it left off.
+  async resumePending() {
+    const open = this.keystore?.list() || [];
+    for (const r of open) {
+      if (this.handling.has(r.swapId)) continue;
+      this.handling.add(r.swapId);
+      this.log(`[maker] resuming ${r.role} swap ${r.swapId.slice(0, 12)} from the keystore`);
+      const run = r.role === "alice" ? this.fulfillAsAlice({ id: r.swapId, token: r.token, saved: r }) : this.fulfill({ id: r.swapId, token: r.token, saved: r });
+      run.then((res) => { this.log(`[maker] resumed ${r.swapId.slice(0, 8)} -> ${res.outcome}`); this.#ev(res.outcome === "completed" ? "completed" : "refunded", { swapId: r.swapId, ...res }); })
+         .catch((e) => { this.log(`[maker] resume error ${r.swapId.slice(0, 8)}: ${e.message}`); this.#ev("error", { swapId: r.swapId, error: e.message }); })
+         .finally(() => this.handling.delete(r.swapId));
+    }
+    return open.length;
   }
 
   // Both legs are buried & safe: claim the taker's QBT to our sink, revealing the preimage in the witness
