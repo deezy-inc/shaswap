@@ -5,7 +5,7 @@
 // with ADMIN_TOKEN. Read-only: it exposes no mutation endpoints and redacts capability tokens.
 import http from "node:http";
 import { randomBytes } from "node:crypto";
-import { allSwaps, getSwap, isOnline, subscribeAll, storeBackend, persistedCounts, persistedVolume } from "./swap.js";
+import { allSwaps, getSwap, isOnline, subscribeAll, storeBackend, persistedCounts, persistedVolume, swapsIncludingSettled } from "./swap.js";
 import { allOffers } from "./offers.js";
 import { rfqStatus } from "./rfq.js";
 import { qbit, btc } from "./chain.js";
@@ -74,7 +74,7 @@ function detail(s) {
 // and enriched: resolve the tier index to its actual feerate, and which leg/chain it hit. Newest first.
 function watchtowerActions() {
   const out = [];
-  for (const s of allSwaps()) {
+  for (const s of swapsIncludingSettled()) {   // incl. evicted settled swaps — their wt actions are history worth showing
     for (const [key, rec] of Object.entries(s.wt || {})) {
       const [role, kind] = key.split(":");
       const leg = kind === "claim"
@@ -153,7 +153,8 @@ export function startAdmin(port = Number(process.env.ADMIN_PORT || 8790), opts =
       if (p === "/api/overview") return json(res, 200, await overview());
       if (p === "/api/swaps") {
         const st = url.searchParams.get("state");
-        let list = allSwaps().map(summary);
+        // Memory + store, merged — the working set alone loses completed swaps once they evict (24h).
+        let list = swapsIncludingSettled(Math.min(Number(url.searchParams.get("limit")) || 1000, 5000)).map(summary);
         if (st) list = list.filter((s) => s.state === st);
         list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
         return json(res, 200, list);

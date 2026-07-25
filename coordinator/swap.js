@@ -62,6 +62,18 @@ export function evictSettled() {
 export const persistedCounts = () => (store.counts ? store.counts() : null);
 export const persistedVolume = () => (store.volume ? store.volume() : null);
 export const recentComplete = (limit) => (store.recent ? store.recent(limit) : null);
+// Working set + persisted history, merged (the LIVE in-memory object wins for any id in both — it's
+// fresher). This is what LIST-style readers (the admin dashboard's swaps table, watchtower panel) must
+// use: allSwaps() alone silently loses long-settled swaps once they evict. Read-only — do not mutate
+// the store-loaded (terminal) entries. `limit` bounds the store read, newest-updated first.
+export function swapsIncludingSettled(limit = 1000) {
+  if (!store.query) return allSwaps();          // JSON/memory backend never evicts — the Map IS the history
+  const out = new Map(swaps);
+  for (const r of store.query("SELECT data FROM swaps ORDER BY updated_at DESC LIMIT ?", limit)) {
+    try { const s = JSON.parse(r.data); if (!out.has(s.id)) out.set(s.id, s); } catch { /* torn row */ }
+  }
+  return [...out.values()];
+}
 
 // ── change pub/sub (drives SSE) ───────────────────────────────────────────────
 const subs = new Map();

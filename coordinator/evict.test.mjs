@@ -8,7 +8,7 @@ process.env.COORD_CHAIN = "dev"; process.env.COORD_DB = DB; process.env.SWAP_EVI
 globalThis.fetch = async () => { throw new Error("no network in this test"); };
 
 let ok = true; const ck = (c, m) => { console.log((c ? "[ok] " : "[FAIL] ") + m); ok = ok && c; };
-const { createSwap, getSwap, allSwaps, evictSettled, persistedCounts, persistedVolume, recentComplete, _store } = await import("./swap.js");
+const { createSwap, getSwap, allSwaps, evictSettled, persistedCounts, persistedVolume, recentComplete, swapsIncludingSettled, _store } = await import("./swap.js");
 
 // Two swaps: one long-settled COMPLETE, one still active (CREATED). Persist the terminal state.
 const done = createSwap({ btcSats: 20_000_000, qbtSats: 100_000_000 });
@@ -34,6 +34,16 @@ ck(c.COMPLETE === 1 && c.CREATED === 1, `store counts full history incl. evicted
 const v = persistedVolume();
 ck(v.complete === 1 && v.btcSats === 20_000_000 && v.qbtSats === 100_000_000, "store volume sums COMPLETE across all history (incl. evicted)");
 ck(recentComplete(10).some((s) => s.id === done.id), "recentComplete surfaces the evicted swap from the store");
+
+// LIST readers (admin swaps table, watchtower panel) must see history: the merged accessor returns the
+// evicted swap alongside the working set — regression for "admin API stopped returning completed swaps".
+{
+  const all = swapsIncludingSettled();
+  ck(all.some((s) => s.id === done.id && s.state === "COMPLETE"), "swapsIncludingSettled surfaces the EVICTED completed swap (the admin-list regression)");
+  ck(all.some((s) => s.id === live.id), "…alongside the live working set");
+  ck(all.find((s) => s.id === live.id) === live, "the in-memory object wins for a live id (fresher than its store row)");
+  ck(allSwaps().length === 1, "…without re-growing the working set");
+}
 
 // A NOT-yet-old terminal swap is retained (only past the grace do we evict).
 const fresh = createSwap({ btcSats: 60_000_000, qbtSats: 400_000_000 });
