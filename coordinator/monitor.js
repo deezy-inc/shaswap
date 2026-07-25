@@ -120,15 +120,24 @@ async function main() {
   // Ping on every swap STATE CHANGE — created, → funding, → claimable, → claimed, → complete, refunded, etc.
   // The state file holds each swap's last-seen state across runs; the first run just records a baseline so we
   // don't replay the whole backlog. Informational, so it's sent immediately (no grace / cooldown).
+  //
+  // BACKFILL, not news: an UNSEEN id that's already settled is almost never a fresh event — it's an old
+  // swap re-entering the admin list (a coordinator restart reloading the store, the admin list's history
+  // fix, an eviction round-trip). Announcing those dumps the whole backlog at once. So an unseen id in a
+  // terminal state is recorded SILENTLY unless it settled within the last ~30 min (a genuinely fresh
+  // completion the monitor just hadn't seen mid-flight). Transitions of KNOWN swaps always ping.
   {
+    const TERMINAL_STATES = ["COMPLETE", "REFUNDED", "ABORTED", "CANCELED"];
     const live = new Set();
     for (const s of swaps) {
       live.add(s.id);
       const prev = state.swapStates[s.id];
-      if (!firstRun && prev !== s.state)
-        await tg(prev === undefined
+      if (!firstRun && prev !== s.state) {
+        const staleBackfill = prev === undefined && TERMINAL_STATES.includes(s.state) && !(s.settledAt && now - s.settledAt < 30 * 60000);
+        if (!staleBackfill) await tg(prev === undefined
           ? `${stEmoji(s.state)} New swap <code>${short(s.id)}</code> · ${fmtAmt(s)} · <b>${s.state}</b>`
           : `${stEmoji(s.state)} Swap <code>${short(s.id)}</code> · ${fmtAmt(s)}: ${prev} → <b>${s.state}</b>`);
+      }
       state.swapStates[s.id] = s.state;
     }
     for (const id of Object.keys(state.swapStates)) if (!live.has(id)) delete state.swapStates[id];   // forget pruned swaps
