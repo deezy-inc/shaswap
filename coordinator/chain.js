@@ -113,8 +113,21 @@ export class Chain {
     // is compatible with a keyless node). Preferred for both BTC and QBT; scales with watched addresses,
     // not mempool size.
     if (this.watch === "wallet") {
-      const wallet = await this.#ensureWatched(spkHex);
-      const utxos = await this.rpcWallet(wallet, "listunspent", 0, 9999999, "[]", true);   // minconf 0 -> includes mempool
+      let utxos;
+      try {
+        const wallet = await this.#ensureWatched(spkHex);
+        utxos = await this.rpcWallet(wallet, "listunspent", 0, 9999999, "[]", true);   // minconf 0 -> includes mempool
+      } catch (e) {
+        // Self-heal a wallet that unloaded OUT FROM UNDER the process (a bitcoind restart doesn't
+        // reload wallets unless load_on_startup was set): #ensureWatched's per-process latch would
+        // otherwise keep trusting a wallet that's gone, failing every poll until a coordinator
+        // restart. Drop the latch and reopen — the descriptors persist in the wallet on disk, and
+        // watched spks re-import idempotently as each swap's poll comes around.
+        if (!/not loaded|does not exist|not found/i.test(String(e.message))) throw e;
+        this._watched = null;
+        const wallet = await this.#ensureWatched(spkHex);
+        utxos = await this.rpcWallet(wallet, "listunspent", 0, 9999999, "[]", true);
+      }
       const u = (utxos || []).find((x) => x.scriptPubKey === spkHex);
       if (!u) return null;
       const c = u.confirmations || 0;
@@ -153,8 +166,8 @@ export class Chain {
     return this._watchWallet;
   }
   async #openWallet(name) {
-    try { await this.rpc("createwallet", name, true, true, "", false, true); } catch { /* exists */ }   // watch-only descriptor wallet
-    try { await this.rpc("loadwallet", name); } catch { /* already loaded */ }
+    try { await this.rpc("createwallet", name, true, true, "", false, true, true); } catch { /* exists */ }   // watch-only descriptor wallet, load_on_startup
+    try { await this.rpc("loadwallet", name, true); } catch { /* already loaded */ }                          // load_on_startup=true: survive bitcoind restarts
   }
   async #importSpk(wallet, spkHex) {
     const info = await this.rpcWallet(wallet, "getdescriptorinfo", `raw(${spkHex})`);

@@ -28,7 +28,9 @@ const HEARTBEAT_HOURS = Number(process.env.HEARTBEAT_HOURS || 24);  // periodic 
 const DISK_WARN_PCT = Number(process.env.DISK_WARN_PCT || 85);
 const DISK_CRIT_PCT = Number(process.env.DISK_CRIT_PCT || 92);
 const MONITOR_SSH_KEY = process.env.MONITOR_SSH_KEY || "/home/ubuntu/.ssh/id_ed25519_monitor";
-const DISK_HOSTS = (process.env.DISK_HOSTS || "swap-server:,swap-node:100.124.145.15,btc-pruned:100.83.251.84")
+// MagicDNS hostnames, not raw tailnet IPs: a node re-joining the tailnet gets a NEW IP (it happened —
+// btc-mainnet-prune moved 100.83.251.84 → 100.67.241.68 on 2026-08-08) and a pinned IP silently breaks.
+const DISK_HOSTS = (process.env.DISK_HOSTS || "swap-server:,swap-node:qbit-swap-node,btc-pruned:btc-mainnet-prune")
   .split(",").map((h) => h.trim()).filter(Boolean).map((h) => { const i = h.indexOf(":"); return { name: h.slice(0, i), host: h.slice(i + 1) || null }; });
 const now = Date.now();
 
