@@ -43,6 +43,13 @@ const en = {
   aboutForkBody: "BTC-Blake2b is the Bitcoin Knots (BIP-110) chain after its proof-of-work change to BLAKE2b: it shares Bitcoin's entire history up to the fork, then continues under hardware SHA-256 miners can't touch. BTC-SHA256 is the original chain. shaswap lets you trade one side for the other atomically — no exchange, no custody. Learn more at",
   faqWhatForkQ: "What are BTC-SHA256 and BTC-Blake2b?",
   faqWhatForkA: "Two sides of the Bitcoin fork: BTC-SHA256 is the original chain (SHA-256d proof of work); BTC-Blake2b is the Bitcoin Knots / BIP-110 chain, which restricted arbitrary data and moved to BLAKE2b proof of work. Coins from before the split exist on both — swapping here lets you exit one side into the other, with replay protection built into every settlement. More at",
+  // deposit-time replay warnings (bip110 pair): the SWAP's own settlement txs are replay-protected by
+  // the app, but the DEPOSIT comes from the user's wallet — they must protect that send themselves.
+  // Only relevant for PRE-FORK coins (shared history); already-split coins need nothing.
+  replayWarnTitle: "Replay protection for this deposit",
+  replayWarnSplit: "If the coins you're sending are already split (received after the fork, or previously separated), no extra steps are needed — skip this.",
+  replayWarnSha: "If your coins predate the fork, a plain BTC-SHA256 transaction can be replayed onto the BTC-Blake2b chain. Have your wallet add an OP_RETURN output carrying more than 83 bytes of data (84 bytes works): BIP-110 nodes refuse to relay such transactions, which pins your deposit to the SHA256 side.",
+  replayWarnBlake: "If your coins predate the fork, a plain BTC-Blake2b transaction can be replayed onto the BTC-SHA256 chain. Sign the deposit with the fork's SIGHASH_UNIFIED flag — it is OPT-IN, not the default, so you must select it in your wallet (ordinary signatures remain valid on both chains). Signatures made with it are invalid on the SHA256 side, which pins your deposit to Blake2b.",
   step1t: "Find someone to trade with", step1dPre: "Meet a counterparty in the ", step1dPost: " — or anywhere you like.",
   step2t: "Agree on price and amount", step2d: "Agree on the terms directly with them before you start.",
   step3t: "Create the swap here", step3d: "Pick a direction and enter the amounts.",
@@ -325,6 +332,10 @@ const zh = {
   // 分叉对（bip110/shaswap）专用文案——由品牌包选择，而非机械替换的 Qbit 文案
   aboutForkTitle: "什么是 BTC-Blake2b？",
   aboutForkBody: "BTC-Blake2b 是 Bitcoin Knots（BIP-110）链在将工作量证明切换为 BLAKE2b 之后的链：它与比特币共享分叉前的全部历史，此后由 SHA-256 矿机无法触及的硬件继续出块。BTC-SHA256 是原链。shaswap 让您以原子方式在两侧之间兑换——不经交易所、非托管。了解更多请访问",
+  replayWarnTitle: "本次充值的重放保护",
+  replayWarnSplit: "如果您发送的币已经分离（分叉后收到，或此前已拆分），则无需任何额外步骤——可跳过本提示。",
+  replayWarnSha: "如果您的币早于分叉，普通的 BTC-SHA256 交易可能被重放到 BTC-Blake2b 链上。请让钱包在交易中加入一个携带超过 83 字节数据的 OP_RETURN 输出（84 字节即可）：BIP-110 节点拒绝转发此类交易，从而将您的充值固定在 SHA256 一侧。",
+  replayWarnBlake: "如果您的币早于分叉，普通的 BTC-Blake2b 交易可能被重放到 BTC-SHA256 链上。请使用分叉的 SIGHASH_UNIFIED 标志签名充值——它是可选项而非默认（普通签名在两条链上均有效），需要在钱包中主动选择。使用该标志的签名在 SHA256 链上无效，从而将您的充值固定在 Blake2b 一侧。",
   faqWhatForkQ: "什么是 BTC-SHA256 和 BTC-Blake2b？",
   faqWhatForkA: "比特币分叉的两侧：BTC-SHA256 是原链（SHA-256d 工作量证明）；BTC-Blake2b 是 Bitcoin Knots / BIP-110 链，它限制了任意数据并将工作量证明改为 BLAKE2b。分裂之前的币在两条链上同时存在——在这里兑换可以让您把一侧换成另一侧，且每笔结算都内建重放保护。更多信息见",
   step1t: "找到交易对手", step1dPre: "在 ", step1dPost: " 或您喜欢的任何地方找到对手方。",
@@ -593,11 +604,12 @@ function relabel(s) {
   // Tickers AND the prose coin names: on a relabeled pair (e.g. the BTC fork), "Qbit"/"Bitcoin"/比特币
   // in copy would be wrong or ambiguous — substitute the configured chain names everywhere.
   return s.replace(/\bQBT\b(?![\w-])/g, qbt).replace(/\bQbit\b/g, qbt)
-    .replace(/\bBTC\b(?![\w-])/g, btc).replace(/\bBitcoin\b/g, btc).replaceAll("比特币", btc);
+    .replace(/\bBTC\b(?![\w-])/g, btc).replace(/\bBitcoin\b/g, btc).replaceAll("比特币", btc)
+    .replaceAll("₿", btc);   // the ₿ glyph means "the base coin" (price pills, trade tables) — spell it out on a fork pair
 }
 // Brand-authored strings (fork about/FAQ copy) are written FOR the relabeled pair — they name
 // "Bitcoin Knots" etc. deliberately and must not be machine-relabeled on top.
-const NO_RELABEL = /^(aboutFork|faqWhatFork)/;
+const NO_RELABEL = /^(aboutFork|faqWhatFork|replayWarn)/;
 export function t(key, params) {
   let s = (DICTS[lang]?.[key] ?? en[key] ?? key);
   if (params) for (const [k, v] of Object.entries(params)) s = s.replaceAll(`{${k}}`, v);

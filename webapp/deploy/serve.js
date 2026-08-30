@@ -74,6 +74,7 @@ function brand(html) {
     ["Qbit&nbsp;swap", "shaswap"],
     ['<meta name="theme-color" content="#07110b" />', '<meta name="theme-color" content="#0b0a08" />'],
     ["https://qbitswap.com", "https://shaswap.com"],
+    ["/og.png", "/og-bip110.png"],   // branded link-preview card (orange pair-coin art, not the Qbit one)
     ["https://discord.gg/xqC7MAk95Q", "https://discord.gg/3Ccegp9YrU"],
     ['aria-label="Qbit Discord" title="Qbit Discord"', 'aria-label="BIP-110 Discord" title="BIP-110 Discord"'],
     ["/* Qbit brand palette (from qbit.org) — green accent on a green-tinted dark base */", "/* base palette (overridden by the data-brand block below) */"],

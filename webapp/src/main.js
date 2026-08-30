@@ -30,8 +30,11 @@ function validAddr(value, coin) {
   const a = (value || "").trim();
   if (!a) throw new Error(t("errEnterAddr", { coin }));
   const want = coin === "BTC" ? "btc" : "qbit";
+  // Fork pairs share one address format (both legs hrp "bc") — the address alone can't say which
+  // leg it belongs to, so the cross-chain check only applies when the hrps actually differ.
+  const sameNet = HRPS.btc === HRPS.qbit;
   let ok = false;
-  try { addressToScriptPubKey(a); ok = addressCoin(a) === want && addressOnNetwork(a, HRPS[want]); } catch { ok = false; }
+  try { addressToScriptPubKey(a); ok = (sameNet || addressCoin(a) === want) && addressOnNetwork(a, HRPS[want]); } catch { ok = false; }
   if (!ok) throw new Error(t("errBadAddr", { coin }));
   return a;
 }
@@ -237,6 +240,14 @@ const spinnerEl = (label) => h("div", { style: "display:flex;flex-direction:colu
 const EMBLEM_BIP110 = `<svg viewBox="0 0 128 84" aria-hidden="true"><circle cx="44" cy="42" r="34" fill="#f7931a"/><text x="44" y="55" text-anchor="middle" font-family="Arial,sans-serif" font-weight="700" font-size="40" fill="#0b0a08">\u20BF</text><g class="orbit" style="transform-origin:86px 42px"><circle cx="86" cy="42" r="31" fill="#0b0a08" stroke="#f7931a" stroke-width="4"/><circle cx="86" cy="42" r="23" fill="none" stroke="#f7931a" stroke-width="3.4" stroke-dasharray="8.4 5.9"/></g><text x="86" y="54" text-anchor="middle" font-family="Arial,sans-serif" font-weight="700" font-size="34" fill="#f7931a">\u20BF</text></svg>`;
 const EMBLEM_QBIT = `<svg viewBox="0 0 320 320" aria-hidden="true"><path class="core" d="m159.745 75.5137c46.2 0 83.652 37.4503 83.652 83.6483 0 46.197-37.452 83.648-83.652 83.648-46.199 0-83.6516-37.451-83.6516-83.648 0-46.198 37.4526-83.6483 83.6516-83.6483z"/><g class="orbit"><path d="m264.882 234.338c16.044 0 29.049 13.005 29.049 29.048 0 16.042-13.005 29.048-29.049 29.048-16.043 0-29.049-13.006-29.049-29.048 0-16.043 13.006-29.048 29.049-29.048z"/><path d="m46.1611 46.159c62.0959-62.0934 163.4069-61.4602 226.2849 1.4142 41.915 41.9136 56.167 100.9048 42.618 153.9748l-.026-.007c-1.478 5.001-6.104 8.652-11.584 8.652-6.672-.001-12.081-5.409-12.081-12.081 0-1.328.217-2.605.613-3.8 11.713-45.226-.14-95.2914-35.565-130.715-53.246-53.2434-139.575-53.2434-192.821 0-53.2456 53.243-53.2452 139.568.0007 192.812 35.4457 35.444 85.5513 47.29 130.7993 35.543 1.17-.377 2.416-.582 3.711-.582 6.672 0 12.081 5.408 12.081 12.08 0 5.477-3.645 10.099-8.642 11.58l.006.02c-53.071 13.548-112.0653-.704-153.9806-42.617-62.8774-62.874-63.5106-164.181-1.4143-226.274z"/></g></svg>`;
 const EMBLEM_SVG = BRAND === "bip110" ? EMBLEM_BIP110 : EMBLEM_QBIT;
+// Direction-chooser icons. On the fork pair a bare "₿"/"Q" is wrong for both slots — use the
+// same mini coins as the emblem (orange = SHA256, dark knot-ring = Blake2b) so they're distinguishable.
+const coinGlyph = (leg) => {
+  if (BRAND !== "bip110") return leg === "btc" ? "₿" : "Q";
+  return h("span", { style: "display:inline-flex", html: leg === "btc"
+    ? `<svg viewBox="0 0 40 40" width="34" height="34" aria-hidden="true"><circle cx="20" cy="20" r="17" fill="#f7931a"/><text x="20" y="27" text-anchor="middle" font-family="Arial,sans-serif" font-weight="700" font-size="20" fill="#0b0a08">₿</text></svg>`
+    : `<svg viewBox="0 0 40 40" width="34" height="34" aria-hidden="true"><circle cx="20" cy="20" r="16" fill="#0b0a08" stroke="#f7931a" stroke-width="2.5"/><circle cx="20" cy="20" r="12" fill="none" stroke="#f7931a" stroke-width="2" stroke-dasharray="4.4 3.1"/><text x="20" y="26" text-anchor="middle" font-family="Arial,sans-serif" font-weight="700" font-size="17" fill="#f7931a">₿</text></svg>` });
+};
 
 // ── instant swap widget (RFQ maker-bot liquidity; flag QBIT_RFQ) ──────────────
 // A Uniswap-style two-panel card on the landing hero: pick a direction, type an amount on either side,
@@ -433,8 +444,8 @@ async function stepChoose(resumable) {
     screen({
       title: t("swapWhichWay"), subtitle: t("nonCustodial"),
       body: [
-        bigChoice("₿", t("haveBtc"), t("haveBtcSub"), () => chooseDirection("btc2qbt")),
-        bigChoice("Q", t("haveQbt"), t("haveQbtSub"), () => chooseDirection("qbt2btc")),
+        bigChoice(coinGlyph("btc"), t("haveBtc"), t("haveBtcSub"), () => chooseDirection("btc2qbt")),
+        bigChoice(coinGlyph("qbit"), t("haveQbt"), t("haveQbtSub"), () => chooseDirection("qbt2btc")),
       ],
       back: () => stepWelcome(),
     }),
@@ -1109,6 +1120,14 @@ function renderLive(card, v) {
       (!funded && send === "BTC" && feerate > 1) ? h("p", { class: "note", style: "margin-top:6px" }, t("feeRateHint", { rate: feerate })) : null,
       // Staggered-funding expectation for the BTC buyer (who funds first): the seller deposits only after this confirms.
       send === "BTC" ? h("p", { class: "note", style: "margin-top:6px;color:var(--mut)" }, t(funded ? "seqBuyerFundedNote" : "seqBuyerNote")) : null,
+      // Fork-pair replay warning, shown BEFORE the user sends: the swap's own settlement txs are
+      // replay-protected by the app, but this DEPOSIT comes from their wallet. Per-side mechanism
+      // (SHA256: >83-byte OP_RETURN; Blake2b: opt-in SIGHASH_UNIFIED) — and none of it is needed
+      // when the coins are already split, which the note says first.
+      (!funded && BRAND === "bip110") ? h("div", { style: "margin-top:10px;padding:10px 12px;border:1px solid var(--warn);border-radius:10px;background:var(--warn-soft)" },
+        h("div", { style: "font-weight:640;color:var(--warn);font-size:13px" }, "⚠️ " + t("replayWarnTitle")),
+        h("p", { class: "note", style: "margin-top:5px" }, t(fundLeg === "btc" ? "replayWarnSha" : "replayWarnBlake")),
+        h("p", { class: "note dim", style: "margin-top:5px" }, t("replayWarnSplit"))) : null,
       funded ? null : h("div", { class: "mono", style: "margin-top:6px" }, addr),
       funded ? null : h("div", { class: "btns" }, copyButton("copyAddress", "copiedCheck", () => addr)),
       (!funded && minsLeft != null) ? h("p", { class: "note", style: `margin-top:10px;color:${minsLeft <= 10 ? "var(--warn)" : "var(--mut)"}` }, t("fundCountdown", { mins: minsLeft })) : null);
