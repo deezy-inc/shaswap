@@ -11,6 +11,7 @@
 //   QBIT_BACKEND=rpc QBIT_RPC_URL=http://user:pass@<qbit-host>:<port>
 //   (optional) BTC_WATCH=wallet  QBIT_WATCH=scan  ORDERBOOK=1
 import http from "node:http";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join, extname } from "node:path";
@@ -110,6 +111,11 @@ function proxy(req, res, port, path) {
   up.on("error", () => { if (!res.headersSent) res.writeHead(502); res.end("proxy error"); });
   req.pipe(up);
 }
+// Short content hash of the built bundle, computed once per process (a deploy restarts the service).
+let _appV = null;
+async function appJsVersion() {
+  return (_appV ||= createHash("sha256").update(await readFile(join(ROOT, "dist/app.js"))).digest("hex").slice(0, 8));
+}
 function unified() {
   return new Promise((resolve) => {
     http.createServer(async (req, res) => {
@@ -125,6 +131,10 @@ function unified() {
         let body = await readFile(file);
         if (file.endsWith("index.html")) {
           let html = body.toString().replace("</head>", `${CONFIG}\n</head>`);
+          // Cache-bust the bundle: Cloudflare's Browser Cache TTL overrides our no-cache on .js
+          // assets (users kept a stale app.js for hours after a deploy), but the HTML is uncached —
+          // so a content-versioned URL makes every deploy take effect on the next page load.
+          html = html.replace('src="./dist/app.js"', `src="./dist/app.js?v=${await appJsVersion()}"`);
           // Localize the link-preview (OG/Twitter) tags for ?lang=zh. Scrapers fetch the exact shared
           // URL, and zh users' shared links carry ?lang=zh — so the zh and en previews never collide.
           if (chain2Preset() === "bip110") html = brand(html);   // rebrand first (zh OG anchors assume Qbit copy — skipped under bip110)

@@ -645,7 +645,8 @@ async function btcUsdPrice() {
   } catch { /* offline / rate-limited → $ mode just stays blank; ₿ mode still works */ }
   return _btcUsd.v;
 }
-let priceMode = "usd";   // "usd" | "btc", persists across re-renders
+// On the fork pair the natural quote is coin-per-coin ("BTC-SHA256 per BTC-Blake2b"), not USD.
+let priceMode = BRAND === "bip110" ? "btc" : "usd";   // "usd" | "btc", persists across re-renders
 
 function stepAmount() {
   rerender = stepAmount;
