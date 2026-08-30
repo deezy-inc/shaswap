@@ -1,27 +1,40 @@
 [English](README.md) · **简体中文**
 
-# qbit-swap
+# shaswap
 
-[![CI](https://github.com/deezy-inc/qbit-swap/actions/workflows/ci.yml/badge.svg)](https://github.com/deezy-inc/qbit-swap/actions/workflows/ci.yml)
+[![CI](https://github.com/deezy-inc/shaswap/actions/workflows/ci.yml/badge.svg)](https://github.com/deezy-inc/shaswap/actions/workflows/ci.yml)
 
-在 **Bitcoin (BTC)** 与 **Qbit (QBT)** 之间进行非托管原子兑换——Qbit 是一个后量子的比特币分叉
-（SLH-DSA 签名、`p2mr` 见证 v2 地址）。用户通过一个**无密钥协调器**进行点对点交易：所有密钥都是临时密钥，
-并在用户的浏览器中生成，所有签名都在客户端完成，协调器只监视链并转发由各方签名的交易。它不持有任何
-密钥，也无法独自转移资金；停滞的兑换总是会退款。（仍存在一项信任假设——需要依赖它诚实地转发各方的
+**比特币分叉之间的去信任原子兑换**——更一般地，比特币与任何兼容 Bitcoin Core RPC 的 UTXO 链之间的
+兑换。链发生分裂时，两侧的持有者都需要一种方式把一侧换成另一侧——**不经交易所、非托管、无需信任对手
+方**。shaswap 就是这样的场所：由**无密钥协调器**驱动的哈希时间锁（Tier-Nolan）原子兑换——所有密钥都
+是临时密钥并在用户浏览器中生成，所有签名在客户端完成，协调器只监视链并转发由各方签名的交易。它不持
+有任何密钥，也无法独自转移资金；停滞的兑换总是会退款。（仍存一项信任假设——需要依赖它诚实转发各方
 公钥；参见 `webapp/README.md` › Trust assumptions。）
 
-> Bitcoin ↔ Qbit 无法使用共享 Schnorr 构造（Qbit 使用 SLH-DSA 签名，而非 Schnorr），因此
-> 本方案采用经典的哈希时间锁（Tier-Nolan）原子兑换：一个 preimage 关联两条腿。
+链对由**一个配置值**决定（`CHAIN2`，见 `coordinator/chains.js`）：
+
+- **`CHAIN2=bip110`** —— **BTC-SHA256 ⇄ BTC-Blake2b**：真实比特币对 BIP-110 分叉（Bitcoin Knots
+  v29.4.x 谱系——RDTS 已激活，Blake2b 工作量证明）。两条腿均为标准比特币脚本（P2WSH + ECDSA），
+  **内建并强制执行分叉重放保护**：BTC 侧每笔清扫都携带超过 83 字节数据载体上限的 OP_RETURN——
+  BIP-110 策略本身拒绝转发/打包此类交易，因此清扫只会落在分裂的一侧。协调器拒绝无标记的清扫；
+  客户端自动构造标记。
+- **`CHAIN2=qbit`**（默认）—— **BTC ⇄ QBT**：Qbit，后量子比特币分叉（SLH-DSA 签名、`p2mr` 见证 v2
+  地址）。Qbit 无法使用共享 Schnorr 构造，因此两种预设采用同一经典 HTLC 设计：一个 preimage 关联
+  两条腿。
+
+每条腿的一切都是槽位配置：脚本族（`p2wsh-ecdsa` | `p2mr-slhdsa`）、bech32 hrp、出块时间、最小额度、
+确认下限、重组成本模型，可选的**信任未确认**模式（受信任双方间 0 确认清扫），以及重放保护开关。
+新增一个分叉只是一个预设，而非重写。
 
 ## 仓库布局
 
-| Path | What it is | Public |
-|---|---|---|
-| `client/` | **客户端库**（`@qbit-swap/client`）——为两条腿构造 HTLC + sighash + 签名；支持浏览器 + Node。内置 WASM SLH-DSA 签名器。 | ✅ |
-| `coordinator/` | **无密钥协调器**——Tier-Nolan 状态机、抗重组的确认门控、退款旁路、SSE 实时推送、在线状态、可插拔的链后端。 | ✅ |
-| `webapp/` | **Web 应用**——一个与钱包无关、每屏一个决策的向导（EN / 简体中文）。临时密钥、页内签名、明文备份文件。 | ✅ |
-| `maker-bot/` | **做市机器人**——RFQ 即时兑换 API 的参考做市实现：持续报出双边报价、以任一角色履约成交、库存感知的报价规模、可插拔的钱包适配器。 | ✅ |
-| `reference/*.py` | Python 参考实现 + 回归测试网验证脚本。 | ✅ |
+| Path | What it is |
+|---|---|
+| `client/` | **客户端库**（`@qbit-swap/client`）——两种脚本族（ECDSA 与 WASM SLH-DSA）的 HTLC 构造 + sighash + 签名、重放标记构造器；支持浏览器 + Node。 |
+| `coordinator/` | **无密钥协调器**——Tier-Nolan 状态机、每腿链配置（`chains.js`）、价值缩放的重组门控、重放标记强制执行、守望塔、RFQ 做市 API、sqlite 持久化、管理面板。 |
+| `webapp/` | **Web 应用**——与钱包无关、每屏一个决策的向导（EN / 简体中文）；链对感知的标签（如 BTC-SHA256 ⇄ BTC-Blake2b）；做市流动性支持的即时兑换组件。 |
+| `maker-bot/` | **做市机器人**——RFQ API 的参考做市实现：双边报价、美元锚定、库存感知规模、抗崩溃密钥存储、Telegram 运维机器人、免节点轻模式。 |
+| `reference/*.py` | Python 参考实现 + 回归测试网验证脚本。 |
 
 ## 兑换的工作原理
 

@@ -17,7 +17,7 @@ import { dirname, join, extname } from "node:path";
 import { startServer } from "../../coordinator/server.js";
 import { startAdmin } from "../../coordinator/admin.js";
 import { MIN_SATS } from "../../coordinator/swap.js";   // single source of truth for the min swap value (env-driven)
-import { publicChains } from "../../coordinator/chains.js";   // per-leg chain identity (CHAIN2 preset) — injected so keys/signing/replay match the pair
+import { publicChains, chain2Preset } from "../../coordinator/chains.js";   // per-leg chain identity (CHAIN2 preset) — injected so keys/signing/replay match the pair
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PUBLIC_URL = (process.env.PUBLIC_URL || "http://127.0.0.1:8080").replace(/\/$/, "");
@@ -27,9 +27,11 @@ const MIME = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/jav
 
 // Address HRPS the app enforces per network (see client/addr.js). A wrong-network address is
 // rejected client-side before any funds move.
-const HRPS = { regtest: { btc: "bcrt", qbit: "qbrt" }, testnet: { btc: "tb", qbit: "tqb" }, mainnet: { btc: "bc", qbit: "qb" } };
+// The chain-pair config is authoritative for hrps (BTC_HRP/ALT_HRP env over the CHAIN2 preset) — a
+// fork pair runs "bc" on BOTH legs, which a NETWORK-keyed table can't express. NETWORK remains the
+// deploy-environment label (display, OG localization).
 const NETWORK = process.env.NETWORK || "regtest";
-const hrps = HRPS[NETWORK] || HRPS.regtest;
+const hrps = { btc: publicChains().btc.hrp, qbit: publicChains().qbit.hrp };
 
 // Same-origin config injected into index.html: the app talks to /coord on its own origin.
 const cfg = [
@@ -46,6 +48,25 @@ const cfg = [
   process.env.QBIT_BROADCAST_URLS ? `window.QBIT_BROADCAST_URLS=${process.env.QBIT_BROADCAST_URLS};` : "",
 ].join("");
 const CONFIG = `<script>${cfg}</script>`;
+
+// Deployment branding: the static index.html ships with Qbit branding; a fork-pair deployment
+// (CHAIN2=bip110, shaswap.com) rebrands server-side — same trick as the zh OG localization.
+function brand(html) {
+  if (chain2Preset() !== "bip110") return html;
+  const subs = [
+    ["Qbit Swap — Onchain atomic swaps between Bitcoin and Qbit", "shaswap — Trustless atomic swaps across the Bitcoin fork"],
+    ["Non-custodial, peer-to-peer atomic swaps between Bitcoin and Qbit. Trade directly with a counterparty on-chain — send from any wallet.",
+     "Non-custodial atomic swaps between BTC-SHA256 and BTC-Blake2b. Trade across the fork directly on-chain — send from any wallet."],
+    ["Non-custodial, peer-to-peer atomic swaps between Bitcoin and Qbit. Send from any wallet; the coordinator never holds your funds.",
+     "Non-custodial atomic swaps between BTC-SHA256 and BTC-Blake2b. Send from any wallet; the coordinator never holds your funds."],
+    ["Non-custodial, peer-to-peer atomic swaps between Bitcoin and Qbit.", "Non-custodial atomic swaps between BTC-SHA256 and BTC-Blake2b."],
+    ["<title>Qbit Swap</title>", "<title>shaswap</title>"],
+    ["Qbit swap", "shaswap"],                     // header wordmark
+    ["https://qbitswap.com", "https://shaswap.com"],
+  ];
+  for (const [a, b] of subs) html = html.split(a).join(b);
+  return html;
+}
 
 // Swap the English link-preview strings for 中文 (ordered longest-first so shared prefixes don't clash),
 // point the preview image at the zh card, and tag the locale. Applied only to ?lang=zh requests.
@@ -87,6 +108,7 @@ function unified() {
           // Localize the link-preview (OG/Twitter) tags for ?lang=zh. Scrapers fetch the exact shared
           // URL, and zh users' shared links carry ?lang=zh — so the zh and en previews never collide.
           if (new URLSearchParams(path.split("?")[1] || "").get("lang") === "zh") html = localizeOgZh(html);
+          html = brand(html);
           body = Buffer.from(html);
         }
         // No hashed asset names yet, so tell the browser to revalidate — otherwise a deploy's new
