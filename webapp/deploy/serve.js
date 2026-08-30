@@ -39,6 +39,7 @@ const cfg = [
   `window.QBIT_HRPS=${JSON.stringify(hrps)};`,
   `window.QBIT_MIN_SATS=${JSON.stringify({ btc: MIN_SATS.btc, qbit: MIN_SATS.qbit })};`,   // min swap value — the app validates against the SAME config the coordinator enforces
   `window.QBIT_CHAINS=${JSON.stringify(publicChains())};`,   // per-leg identity: labels, script family, trust/replay flags (CHAIN2 pair)
+  chain2Preset() === "bip110" ? `window.QBIT_BRAND="bip110";` : "",   // brand pack: theme/logos/links branch on this
   process.env.ORDERBOOK ? "window.QBIT_ORDERBOOK=true;" : "",
   process.env.RECENT_TRADES ? "window.QBIT_RECENT_TRADES=true;" : "",
   process.env.RFQ ? "window.QBIT_RFQ=true;" : "",   // instant-swap widget (needs RFQ_MAKER_KEYS on the coordinator to actually serve liquidity)
@@ -50,21 +51,37 @@ const cfg = [
 const CONFIG = `<script>${cfg}</script>`;
 
 // Deployment branding: the static index.html ships with Qbit branding; a fork-pair deployment
-// (CHAIN2=bip110, shaswap.com) rebrands server-side — same trick as the zh OG localization.
+// (CHAIN2=bip110, shaswap.com) rebrands server-side — theme attribute, favicon, header mark (Bitcoin +
+// Knots pair coins), wordmark, every OG/meta variant, and the community Discord. The app JS handles the
+// rest via window.QBIT_BRAND (emblem, about/FAQ copy, links).
+const BIP110_FAVICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0a08'/%3E%3Ccircle cx='16' cy='16' r='11' fill='%23f7931a'/%3E%3Ctext x='16' y='21.5' text-anchor='middle' font-family='Arial,sans-serif' font-weight='700' font-size='15' fill='%230b0a08'%3E%E2%82%BF%3C/text%3E%3C/svg%3E";
+// Pair mark: the Bitcoin coin (solid orange ₿) interlocked with the Knots coin (dark, orange knotted
+// ring — the braided dashes suggest Knots' rope-work identity without reproducing its trademark art).
+const BIP110_MARK = `<svg viewBox="0 0 64 40" aria-hidden="true"><circle cx="22" cy="20" r="17" fill="#f7931a"/><text x="22" y="27" text-anchor="middle" font-family="Arial,sans-serif" font-weight="700" font-size="20" fill="#0b0a08">\u20BF</text><circle cx="44" cy="20" r="16" fill="#0b0a08" stroke="#f7931a" stroke-width="2.5"/><circle cx="44" cy="20" r="12" fill="none" stroke="#f7931a" stroke-width="2" stroke-dasharray="4.4 3.1"/><text x="44" y="26" text-anchor="middle" font-family="Arial,sans-serif" font-weight="700" font-size="17" fill="#f7931a">\u20BF</text></svg>`;
 function brand(html) {
   if (chain2Preset() !== "bip110") return html;
   const subs = [
-    ["Qbit Swap — Onchain atomic swaps between Bitcoin and Qbit", "shaswap — Trustless atomic swaps across the Bitcoin fork"],
+    ["<html lang=\"en\">", "<html lang=\"en\" data-brand=\"bip110\">"],
+    ["<title>Qbit Swap</title>", "<title>shaswap — swap across the Bitcoin fork</title>"],
+    ["Qbit Swap — Onchain atomic swaps between Bitcoin and Qbit", "shaswap — Trustless atomic swaps between BTC-SHA256 and BTC-Blake2b"],
+    ["Qbit Swap — onchain atomic swaps between Bitcoin and Qbit", "shaswap — trustless atomic swaps between BTC-SHA256 and BTC-Blake2b"],
     ["Non-custodial, peer-to-peer atomic swaps between Bitcoin and Qbit. Trade directly with a counterparty on-chain — send from any wallet.",
      "Non-custodial atomic swaps between BTC-SHA256 and BTC-Blake2b. Trade across the fork directly on-chain — send from any wallet."],
     ["Non-custodial, peer-to-peer atomic swaps between Bitcoin and Qbit. Send from any wallet; the coordinator never holds your funds.",
      "Non-custodial atomic swaps between BTC-SHA256 and BTC-Blake2b. Send from any wallet; the coordinator never holds your funds."],
     ["Non-custodial, peer-to-peer atomic swaps between Bitcoin and Qbit.", "Non-custodial atomic swaps between BTC-SHA256 and BTC-Blake2b."],
-    ["<title>Qbit Swap</title>", "<title>shaswap</title>"],
-    ["Qbit swap", "shaswap"],                     // header wordmark
+    ['content="Qbit Swap"', 'content="shaswap"'],
+    ["Qbit&nbsp;swap", "shaswap"],
+    ['<meta name="theme-color" content="#07110b" />', '<meta name="theme-color" content="#0b0a08" />'],
     ["https://qbitswap.com", "https://shaswap.com"],
+    ["https://discord.gg/xqC7MAk95Q", "https://discord.gg/3Ccegp9YrU"],
+    ['aria-label="Qbit Discord" title="Qbit Discord"', 'aria-label="BIP-110 Discord" title="BIP-110 Discord"'],
   ];
   for (const [a, b] of subs) html = html.split(a).join(b);
+  // swap the header mark (the green Q orbit) for the pair coins
+  html = html.replace(/<span class="mark" aria-hidden="true"><svg[\s\S]*?<\/svg><\/span>/, `<span class="mark" aria-hidden="true">${BIP110_MARK}</span>`);
+  // favicon
+  html = html.replace(/<link rel="icon" href="data:image\/svg\+xml,[^"]*" \/>/, `<link rel="icon" href="${BIP110_FAVICON}" />`);
   return html;
 }
 
@@ -107,8 +124,8 @@ function unified() {
           let html = body.toString().replace("</head>", `${CONFIG}\n</head>`);
           // Localize the link-preview (OG/Twitter) tags for ?lang=zh. Scrapers fetch the exact shared
           // URL, and zh users' shared links carry ?lang=zh — so the zh and en previews never collide.
-          if (new URLSearchParams(path.split("?")[1] || "").get("lang") === "zh") html = localizeOgZh(html);
-          html = brand(html);
+          if (chain2Preset() === "bip110") html = brand(html);   // rebrand first (zh OG anchors assume Qbit copy — skipped under bip110)
+          else if (new URLSearchParams(path.split("?")[1] || "").get("lang") === "zh") html = localizeOgZh(html);
           body = Buffer.from(html);
         }
         // No hashed asset names yet, so tell the browser to revalidate — otherwise a deploy's new

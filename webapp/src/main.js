@@ -61,6 +61,12 @@ const DIR = { btc2qbt: { from: "BTC", to: "QBT" }, qbt2btc: { from: "QBT", to: "
 // Display label for an internal coin symbol — configured pair tickers (e.g. BTC-SHA256/BTC-Blake2b
 // under CHAIN2=bip110). Strings built via t() are relabeled inside i18n; use L() for raw templates.
 const L = (coin) => (coin === "BTC" ? tickers().btc : coin === "QBT" ? tickers().qbt : coin);
+// Brand pack (window.QBIT_BRAND, injected by serve.js from CHAIN2): the bip110/shaswap deployment gets
+// its own community links, project-about copy, and hero emblem; default deployments keep Qbit's.
+const BRAND = globalThis.QBIT_BRAND || null;
+const DISCORD_URL = BRAND === "bip110" ? "https://discord.gg/3Ccegp9YrU" : DISCORD_URL;
+const PROJECT_LINK = BRAND === "bip110" ? { href: "https://btc-blake2b.org/", text: "btc-blake2b.org" } : { href: "https://qbit.org/", text: "qbit.org" };
+const bk = (key) => (BRAND === "bip110" ? { aboutQbitTitle: "aboutForkTitle", aboutQbitBody: "aboutForkBody", faqWhatQ: "faqWhatForkQ", faqWhatA: "faqWhatForkA" }[key] || key : key);
 const dirForRole = (role) => (role === "bob" ? "qbt2btc" : "btc2qbt");
 const coinLeg = (coin) => (coin === "BTC" ? "btc" : "qbit");
 const sats = (n) => (n / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 });   // DISPLAY only (grouped) — never write this into an <input>: its thousands comma breaks parseFloat on re-read
@@ -228,7 +234,9 @@ function homeFromNav() { try { history.replaceState({ pos: histPos }, "", "/" + 
 const spinnerEl = (label) => h("div", { style: "display:flex;flex-direction:column;align-items:center;gap:14px;padding:44px 0 36px" },
   h("div", { class: "hero-emblem boot", style: "margin:0;width:60px", html: EMBLEM_SVG }),
   label ? h("span", { class: "muted", style: "font-size:14px" }, label) : null);
-const EMBLEM_SVG = `<svg viewBox="0 0 320 320" aria-hidden="true"><path class="core" d="m159.745 75.5137c46.2 0 83.652 37.4503 83.652 83.6483 0 46.197-37.452 83.648-83.652 83.648-46.199 0-83.6516-37.451-83.6516-83.648 0-46.198 37.4526-83.6483 83.6516-83.6483z"/><g class="orbit"><path d="m264.882 234.338c16.044 0 29.049 13.005 29.049 29.048 0 16.042-13.005 29.048-29.049 29.048-16.043 0-29.049-13.006-29.049-29.048 0-16.043 13.006-29.048 29.049-29.048z"/><path d="m46.1611 46.159c62.0959-62.0934 163.4069-61.4602 226.2849 1.4142 41.915 41.9136 56.167 100.9048 42.618 153.9748l-.026-.007c-1.478 5.001-6.104 8.652-11.584 8.652-6.672-.001-12.081-5.409-12.081-12.081 0-1.328.217-2.605.613-3.8 11.713-45.226-.14-95.2914-35.565-130.715-53.246-53.2434-139.575-53.2434-192.821 0-53.2456 53.243-53.2452 139.568.0007 192.812 35.4457 35.444 85.5513 47.29 130.7993 35.543 1.17-.377 2.416-.582 3.711-.582 6.672 0 12.081 5.408 12.081 12.08 0 5.477-3.645 10.099-8.642 11.58l.006.02c-53.071 13.548-112.0653-.704-153.9806-42.617-62.8774-62.874-63.5106-164.181-1.4143-226.274z"/></g></svg>`;
+const EMBLEM_BIP110 = `<svg viewBox="0 0 128 84" aria-hidden="true"><circle cx="44" cy="42" r="34" fill="#f7931a"/><text x="44" y="55" text-anchor="middle" font-family="Arial,sans-serif" font-weight="700" font-size="40" fill="#0b0a08">\u20BF</text><g class="orbit" style="transform-origin:86px 42px"><circle cx="86" cy="42" r="31" fill="#0b0a08" stroke="#f7931a" stroke-width="4"/><circle cx="86" cy="42" r="23" fill="none" stroke="#f7931a" stroke-width="3.4" stroke-dasharray="8.4 5.9"/></g><text x="86" y="54" text-anchor="middle" font-family="Arial,sans-serif" font-weight="700" font-size="34" fill="#f7931a">\u20BF</text></svg>`;
+const EMBLEM_QBIT = `<svg viewBox="0 0 320 320" aria-hidden="true"><path class="core" d="m159.745 75.5137c46.2 0 83.652 37.4503 83.652 83.6483 0 46.197-37.452 83.648-83.652 83.648-46.199 0-83.6516-37.451-83.6516-83.648 0-46.198 37.4526-83.6483 83.6516-83.6483z"/><g class="orbit"><path d="m264.882 234.338c16.044 0 29.049 13.005 29.049 29.048 0 16.042-13.005 29.048-29.049 29.048-16.043 0-29.049-13.006-29.049-29.048 0-16.043 13.006-29.048 29.049-29.048z"/><path d="m46.1611 46.159c62.0959-62.0934 163.4069-61.4602 226.2849 1.4142 41.915 41.9136 56.167 100.9048 42.618 153.9748l-.026-.007c-1.478 5.001-6.104 8.652-11.584 8.652-6.672-.001-12.081-5.409-12.081-12.081 0-1.328.217-2.605.613-3.8 11.713-45.226-.14-95.2914-35.565-130.715-53.246-53.2434-139.575-53.2434-192.821 0-53.2456 53.243-53.2452 139.568.0007 192.812 35.4457 35.444 85.5513 47.29 130.7993 35.543 1.17-.377 2.416-.582 3.711-.582 6.672 0 12.081 5.408 12.081 12.08 0 5.477-3.645 10.099-8.642 11.58l.006.02c-53.071 13.548-112.0653-.704-153.9806-42.617-62.8774-62.874-63.5106-164.181-1.4143-226.274z"/></g></svg>`;
+const EMBLEM_SVG = BRAND === "bip110" ? EMBLEM_BIP110 : EMBLEM_QBIT;
 
 // ── instant swap widget (RFQ maker-bot liquidity; flag QBIT_RFQ) ──────────────
 // A Uniswap-style two-panel card on the landing hero: pick a direction, type an amount on either side,
@@ -404,13 +412,13 @@ function stepWelcome() {
       h("h2", {}, t("stepsTitle")),
       h("div", { class: "steps" },
         stepRow(1, h("p", {}, t("step1dPre"),
-          h("a", { href: "https://discord.gg/xqC7MAk95Q", target: "_blank", rel: "noopener" }, t("confirmDiscordLink")),
+          h("a", { href: DISCORD_URL, target: "_blank", rel: "noopener" }, t("confirmDiscordLink")),
           t("step1dPost"))),
         stepRow(2), stepRow(3), stepRow(4), stepRow(5), stepRow(6), stepRow(7))),
     h("section", { class: "about" },
-      h("h2", {}, t("aboutQbitTitle")),
-      h("p", { class: "about-body" }, t("aboutQbitBody"), " ",
-        h("a", { href: "https://qbit.org/", target: "_blank", rel: "noopener" }, "qbit.org"))),
+      h("h2", {}, t(bk("aboutQbitTitle"))),
+      h("p", { class: "about-body" }, t(bk("aboutQbitBody")), " ",
+        h("a", { href: PROJECT_LINK.href, target: "_blank", rel: "noopener" }, PROJECT_LINK.text))),
   ));
 }
 const stepRow = (n, detail) => h("div", { class: "step" },
@@ -459,7 +467,7 @@ function stepInfo() {
     h("section", { class: "page-section" },
       h("h2", {}, t("infoFaqTitle")),
       h("div", { class: "qa-grid" },
-        qa("faqWhatQ", "faqWhatA", { href: "https://qbit.org/", text: "qbit.org" }),
+        qa(bk("faqWhatQ"), bk("faqWhatA"), PROJECT_LINK),
         qa("faqCustodialQ", "faqCustodialA"), qa("faqStallQ", "faqStallA"), qa("faqHowLongQ", "faqHowLongA"),
         qa("faqFindQ", "faqFindA"), qa("faqFeesQ", "faqFeesA"), qa("faqWalletQ", "faqWalletA"), qa("faqBackupQ", "faqBackupA"))),
     h("section", { class: "page-section" },
@@ -608,7 +616,7 @@ function stepConfirm() {
       h("p", { class: "note" }, t("confirmP2")),
       h("p", { class: "note" }, t("confirmP3")),
       h("p", { class: "note" }, t("confirmDiscordPre"),
-        h("a", { href: "https://discord.gg/xqC7MAk95Q", target: "_blank", rel: "noopener" }, t("confirmDiscordLink")),
+        h("a", { href: DISCORD_URL, target: "_blank", rel: "noopener" }, t("confirmDiscordLink")),
         t("confirmDiscordPost")),
     ],
     cta: t("confirmCta"), onCta: () => stepAmount(), back: () => (ORDERBOOK ? showMarket(flow.direction) : stepChoose()),

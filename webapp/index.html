@@ -40,6 +40,21 @@
     --ease:cubic-bezier(.22,.61,.36,1); --dur:.17s;
     color-scheme:dark;
   }
+  /* bip110 brand (shaswap): Bitcoin orange on a warm neutral black — activated server-side via
+     <html data-brand="bip110">. Semantic good/warn/bad stay untouched; only the identity hue moves. */
+  :root[data-brand="bip110"] {
+    --bg:#0b0a08; --surface:#141210; --surface-2:#1b1813; --raised:#242019;
+    --line:#2b251c; --line-2:#3d3424;
+    --ink:#f2eee7; --ink-2:#d3cbbf; --mut:#958b7a;
+    --accent:#f7931a; --accent-ink:#1a0f00; --accent-soft:rgba(247,147,26,.15);
+    --accent-line:rgba(247,147,26,.45); --accent-bright:#ffa733;
+  }
+  /* the hero halo/glow are hardcoded green above — re-tint for the orange brand */
+  :root[data-brand="bip110"] .hero::before { background:radial-gradient(circle at center, rgba(247,147,26,.14), transparent 60%) !important; }
+  :root[data-brand="bip110"] .hero-emblem { filter:drop-shadow(0 8px 30px rgba(247,147,26,.28)); }
+  /* pair-coin mark is wide (64x40), not square — let it breathe */
+  :root[data-brand="bip110"] .mark { width:40px; }
+  :root[data-brand="bip110"] .mark svg { width:40px; height:25px; }
   /* Dark mode always (Qbit brand look) — no light-mode override. */
   * { box-sizing:border-box; }
   html { -webkit-text-size-adjust:100%; }
@@ -337,7 +352,7 @@
   <a class="navlink" id="trades-link" href="/activity" style="display:none">Activity</a>
   <a class="navlink" id="info-link" href="/info">Info</a>
   <a class="navlink" id="api-link" href="/api" style="margin-left:13px">API</a>
-  <a class="gh" href="https://github.com/deezy-inc/qbit-swap" target="_blank" rel="noopener" aria-label="GitHub repository" title="Source on GitHub">
+  <a class="gh" href="https://github.com/deezy-inc/shaswap" target="_blank" rel="noopener" aria-label="GitHub repository" title="Source on GitHub">
     <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
   </a>
   <a class="gh" href="https://discord.gg/xqC7MAk95Q" target="_blank" rel="noopener" aria-label="Qbit Discord" title="Qbit Discord">

@@ -38,6 +38,11 @@ const en = {
   stepsTitle: "How a swap works",
   aboutQbitTitle: "What is Qbit?",
   aboutQbitBody: "Qbit (QBT) is a proof-of-work chain secured by post-quantum, hash-based signatures. To learn more about the project, visit",
+  // fork-pair (bip110/shaswap) variants — selected by the brand pack, NOT auto-relabeled Qbit copy
+  aboutForkTitle: "What is BTC-Blake2b?",
+  aboutForkBody: "BTC-Blake2b is the Bitcoin Knots (BIP-110) chain after its proof-of-work change to BLAKE2b: it shares Bitcoin's entire history up to the fork, then continues under hardware SHA-256 miners can't touch. BTC-SHA256 is the original chain. shaswap lets you trade one side for the other atomically — no exchange, no custody. Learn more at",
+  faqWhatForkQ: "What are BTC-SHA256 and BTC-Blake2b?",
+  faqWhatForkA: "Two sides of the Bitcoin fork: BTC-SHA256 is the original chain (SHA-256d proof of work); BTC-Blake2b is the Bitcoin Knots / BIP-110 chain, which restricted arbitrary data and moved to BLAKE2b proof of work. Coins from before the split exist on both — swapping here lets you exit one side into the other, with replay protection built into every settlement. More at",
   step1t: "Find someone to trade with", step1dPre: "Meet a counterparty in the ", step1dPost: " — or anywhere you like.",
   step2t: "Agree on price and amount", step2d: "Agree on the terms directly with them before you start.",
   step3t: "Create the swap here", step3d: "Pick a direction and enter the amounts.",
@@ -317,6 +322,11 @@ const zh = {
   stepsTitle: "兑换流程",
   aboutQbitTitle: "什么是 Qbit？",
   aboutQbitBody: "Qbit（QBT）是一条采用工作量证明、并以抗量子的哈希签名保障安全的区块链。要进一步了解该项目，请访问",
+  // 分叉对（bip110/shaswap）专用文案——由品牌包选择，而非机械替换的 Qbit 文案
+  aboutForkTitle: "什么是 BTC-Blake2b？",
+  aboutForkBody: "BTC-Blake2b 是 Bitcoin Knots（BIP-110）链在将工作量证明切换为 BLAKE2b 之后的链：它与比特币共享分叉前的全部历史，此后由 SHA-256 矿机无法触及的硬件继续出块。BTC-SHA256 是原链。shaswap 让您以原子方式在两侧之间兑换——不经交易所、非托管。了解更多请访问",
+  faqWhatForkQ: "什么是 BTC-SHA256 和 BTC-Blake2b？",
+  faqWhatForkA: "比特币分叉的两侧：BTC-SHA256 是原链（SHA-256d 工作量证明）；BTC-Blake2b 是 Bitcoin Knots / BIP-110 链，它限制了任意数据并将工作量证明改为 BLAKE2b。分裂之前的币在两条链上同时存在——在这里兑换可以让您把一侧换成另一侧，且每笔结算都内建重放保护。更多信息见",
   step1t: "找到交易对手", step1dPre: "在 ", step1dPost: " 或您喜欢的任何地方找到对手方。",
   step2t: "商定价格和数量", step2d: "开始前先与对方直接敲定条款。",
   step3t: "在此创建兑换", step3d: "选择方向并输入数量。",
@@ -585,8 +595,11 @@ function relabel(s) {
   return s.replace(/\bQBT\b(?![\w-])/g, qbt).replace(/\bQbit\b/g, qbt)
     .replace(/\bBTC\b(?![\w-])/g, btc).replace(/\bBitcoin\b/g, btc).replaceAll("比特币", btc);
 }
+// Brand-authored strings (fork about/FAQ copy) are written FOR the relabeled pair — they name
+// "Bitcoin Knots" etc. deliberately and must not be machine-relabeled on top.
+const NO_RELABEL = /^(aboutFork|faqWhatFork)/;
 export function t(key, params) {
   let s = (DICTS[lang]?.[key] ?? en[key] ?? key);
   if (params) for (const [k, v] of Object.entries(params)) s = s.replaceAll(`{${k}}`, v);
-  return relabel(s);
+  return NO_RELABEL.test(key) ? s : relabel(s);
 }
