@@ -76,6 +76,8 @@ function brand(html) {
     ["https://qbitswap.com", "https://shaswap.com"],
     ["https://discord.gg/xqC7MAk95Q", "https://discord.gg/3Ccegp9YrU"],
     ['aria-label="Qbit Discord" title="Qbit Discord"', 'aria-label="BIP-110 Discord" title="BIP-110 Discord"'],
+    ["/* Qbit brand palette (from qbit.org) — green accent on a green-tinted dark base */", "/* base palette (overridden by the data-brand block below) */"],
+    ["/* Dark mode always (Qbit brand look) — no light-mode override. */", "/* Dark mode always — no light-mode override. */"],
   ];
   for (const [a, b] of subs) html = html.split(a).join(b);
   // swap the header mark (the green Q orbit) for the pair coins
