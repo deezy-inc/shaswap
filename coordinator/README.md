@@ -103,6 +103,35 @@ Per-maker stats (`fillRate`, `noShow`, `suspended`, …) surface in the admin ov
 Knobs: `RFQ_REP_GRACE_MS` (15m — how long a cleared-but-unfunded match waits before it's a no-show),
 `RFQ_REP_WINDOW_MS` (1h), `RFQ_REP_SUSPEND` (3; 0 disables).
 
+## Chain pair (`chains.js`) — the second leg is configurable
+The engine has two chain slots: `btc` and a second slot (wire name `qbit`) that can be **any UTXO chain
+speaking Bitcoin-Core-compatible RPC**. One env selects a preset:
+
+- `CHAIN2=qbit` *(default — behavior identical to before)*: p2mr/SLH-DSA HTLCs, `conftarget-rpc`
+  reorg model, qbit params.
+- `CHAIN2=bip110`: the **BTC ⇄ BTC/Blake2b fork** pair (Bitcoin Knots v29.4.x lineage, BIP-110
+  active). Standard Bitcoin script → **P2WSH + ECDSA HTLCs on both legs**, `bc` addresses on both,
+  `fixed` reorg model (Blake2b hashrate can't be subsidy-priced; `ALT_FIXED_CONFS`, default 12), and
+  **replay protection ON for the BTC side** (below). Point `QBIT_RPC_URL` at a fork node.
+
+Every preset knob is env-tunable (`ALT_LABEL/HRP/BLOCK_SECS/MIN_SATS/MIN_CONFS/SCRIPT/REORG_MODEL/
+FIXED_CONFS`; legacy `QBIT_*` envs still work). `validateChains()` refuses to boot on a bad config;
+`GET /chains` (public) tells clients what each leg is, and the swap view carries it as `chains`.
+
+**Replay protection** (`*_REPLAY_OPRETURN`): both fork chains share pre-fork history, so a sweep can
+replay across the pair. On a flagged leg every sweep must carry an **OP_RETURN with a >83-byte
+payload** — BIP-110 (the datacarrier restriction) makes such a tx un-relayable/un-minable on the fork
+chain, pinning the sweep to the Core side. The coordinator **enforces** this at `broadcast` AND on
+watchtower bundles at `finish`; the client lib builds it (`btcSpend({ replay: true })`). The fork side
+has no marker trick (the fork *enforces* small datacarrier): until its opt-in `SIGHASH_UNIFIED` client
+stabilizes, **fund the fork leg from post-fork (split) coins** so the funding chain can't mirror.
+
+**Trust-unconfirmed** (`BTC_TRUST_UNCONFIRMED` / `ALT_TRUST_UNCONFIRMED`): treat a 0-conf mempool
+deposit on that leg as final — the claimable gate, sequenced-funding gate, and broadcast hold-gate all
+pass at 0-conf, so a swap can sweep before ANY confirmation. **Unsafe against an adversarial
+counterparty** (unconfirmed txs can be RBF'd/double-spent); meant for trusted settings — your own
+maker on both sides, demos, or fork pairs where you accept mempool risk for speed.
+
 ## Backends (env, per chain — see `chain.js`)
 Each chain picks a backend via `<CHAIN>_BACKEND` (falls back to `COORD_CHAIN`, then `dev`):
 - **`dev`** — shells to a node CLI. Set `<CHAIN>_CLI` and, to run remotely, `<CHAIN>_SSH_HOST`

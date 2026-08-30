@@ -4,7 +4,7 @@
   "description": "",
   "main": "chain.js",
   "scripts": {
-    "test": "node esplora.test.mjs && node wtfee.test.mjs && node feeaddr.test.mjs && node fee.test.mjs && node preimage_exposure.test.mjs && node rfq.test.mjs && node rfq_fee.test.mjs && node rfq_reputation.test.mjs && node rfq_plan.test.mjs && node persist.test.mjs && node store.test.mjs && node heightcache.test.mjs && node evict.test.mjs",
+    "test": "node esplora.test.mjs && node wtfee.test.mjs && node feeaddr.test.mjs && node fee.test.mjs && node preimage_exposure.test.mjs && node rfq.test.mjs && node rfq_fee.test.mjs && node rfq_reputation.test.mjs && node rfq_plan.test.mjs && node persist.test.mjs && node store.test.mjs && node heightcache.test.mjs && node evict.test.mjs && node chains.test.mjs",
     "start": "node server.js"
   },
   "keywords": [],

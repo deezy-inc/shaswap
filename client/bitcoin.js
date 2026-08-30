@@ -59,14 +59,28 @@ export function serializeSegwit(version, vin, vout, witnesses, locktime) {
   return concatBytes(...parts);
 }
 
+// Fork replay-protection marker: an OP_RETURN whose payload exceeds the 83-byte datacarrier policy
+// cap. A BIP-110 (RDTS) chain will not relay or mine a transaction carrying it, while stock Core
+// will — so a sweep built WITH the marker settles on exactly one side of a policy-fork pair. Fixed,
+// greppable content; the protection is the SIZE, not the bytes. spk = OP_RETURN OP_PUSHDATA1 <100B>.
+export const REPLAY_PAYLOAD_BYTES = 100;
+export function replayMarkerSpk() {
+  const payload = new Uint8Array(REPLAY_PAYLOAD_BYTES);
+  payload.set(new TextEncoder().encode("qbit-swap replay guard: this transaction is intended for exactly one chain of a policy fork.").slice(0, REPLAY_PAYLOAD_BYTES));
+  return concatBytes(u8(0x6a, 0x4c, REPLAY_PAYLOAD_BYTES), payload);
+}
+
 // Build a signed P2WSH HTLC spend. branch: "claim" (needs preimage) or "refund" (after CLTV).
-export function btcSpend({ prevTxidLE, vout, amount, ws, priv, destSpk, outVal, branch, preimage, locktime = 0, extraOut = null }) {
+// `replay: true` appends the zero-value replay marker output (signed with the rest, so it can't be
+// stripped without invalidating the signature — required by the coordinator on replay-protected legs).
+export function btcSpend({ prevTxidLE, vout, amount, ws, priv, destSpk, outVal, branch, preimage, locktime = 0, extraOut = null, replay = false }) {
   const seq = branch === "refund" ? 0xfffffffe : 0xffffffff;
   const vin = [{ txidLE: prevTxidLE, vout, sequence: seq }];
   const outs = [{ value: BigInt(outVal), spk: destSpk }];
   // Optional second output — the coordinator fee, on a successful claim. It's inside the signed set of
   // outputs (the sighash below covers `outs`), so it can't be altered without re-signing.
   if (extraOut) outs.push({ value: BigInt(extraOut.value), spk: extraOut.spk });
+  if (replay) outs.push({ value: 0n, spk: replayMarkerSpk() });
   const sig = ecdsaSign(priv, bip143Sighash({ version: 2, vin, vout: outs, inputIndex: 0, scriptCode: ws, amount: BigInt(amount), locktime }));
   const witness = branch === "claim" ? [sig, preimage, u8(0x01), ws] : [sig, new Uint8Array(0), ws];
   return serializeSegwit(2, vin, outs, [witness], locktime);

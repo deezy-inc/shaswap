@@ -23,6 +23,6 @@ export { slhDsaSign, slhDsaKeygen } from "./signer.js";
 // ── Bitcoin leg ─────────────────────────────────────────────────────────────
 export {
   compressedPub, ecdsaSign, htlcWitnessScript, p2wshSpk, p2wshAddr,
-  bip143Sighash, serializeSegwit, btcSpend,
+  bip143Sighash, serializeSegwit, btcSpend, replayMarkerSpk, REPLAY_PAYLOAD_BYTES,
 } from "./bitcoin.js";
 export { splitterScript, splitterAddress, splitFunding } from "./fanout.js";

@@ -1,0 +1,107 @@
+// Per-leg chain configuration. The engine has two chain SLOTS with fixed internal keys — "btc" (the
+// fromLeg: the initiator/QBT-buyer funds it) and "qbit" (the toLeg: the seller funds it). The KEYS are
+// wire/persistence names and never change (API fields, sqlite rows, and the webapp all speak
+// btcSats/qbtSats); what each slot actually IS comes from here — so the second slot can be any UTXO
+// chain that speaks Bitcoin-Core-compatible RPC. Select it with ONE env:
+//
+//   CHAIN2=qbit     (default) the qbit chain — p2mr HTLCs, SLH-DSA, conftarget-rpc reorg model
+//   CHAIN2=bip110   the BTC/Blake2b fork (Knots v29.4.x lineage, BIP-110 active): standard Bitcoin
+//                   script → P2WSH + ECDSA HTLCs, "fixed" reorg model (young Blake2b hashrate can't be
+//                   subsidy-priced), and — because both chains share pre-fork history — REPLAY
+//                   PROTECTION: BTC-side sweeps carry a >83-byte OP_RETURN, which BIP-110 (the
+//                   datacarrier restriction itself) makes un-relayable on the fork chain. Fork-side
+//                   sweeps have no marker trick (the fork ENFORCES small datacarrier); its opt-in
+//                   SIGHASH_UNIFIED is a follow-up once the client stabilizes — until then fund the
+//                   fork leg from post-fork (split) coins so the funding chain can't mirror.
+//
+// Every per-slot knob (env overrides the preset; legacy QBIT_* envs still work for the second slot):
+//   label            display ticker (view.chains; wire fields stay btcSats/qbtSats)
+//   hrp              bech32 hrp for HTLC deposit addresses (a fork pair uses "bc" on BOTH slots)
+//   blockSecs        target block time — converts wall-clock timelock windows to per-chain blocks
+//   minSats          minimum swap size on this leg
+//   minConfs         floor on the reorg-safe confirmation gate
+//   script           HTLC family: "p2wsh-ecdsa" (Bitcoin-family) | "p2mr-slhdsa" (qbit)
+//   reorgModel       value-scaled gate pricing: "btc-subsidy" | "conftarget-rpc" | "fixed"
+//   fixedConfs       confs used when reorgModel="fixed"
+//   trustUnconfirmed treat a 0-conf (mempool) deposit on THIS leg as final: the claimable gate, the
+//                    sequenced-funding gate, and the broadcast hold-gate all pass at 0-conf. UNSAFE
+//                    against an adversarial counterparty (RBF/double-spend) — for trusted settings
+//                    only (your own maker on both sides, demos, fork pairs where speed wins).
+//   replayOpReturn   sweeps (claim/refund) on THIS leg must carry a >83-byte OP_RETURN. The
+//                    coordinator ENFORCES it at broadcast; clients build it (btcSpend `replay`).
+//
+// Reads are per-call (no cache) so tests can flip env live; the coordinator reads these at swap-derive
+// and gate time, so a restart applies a config change to NEW swaps only (derived HTLCs are immutable).
+import { replayMarkerSpk as clientReplayMarkerSpk } from "../client/index.js";
+
+const env = (k, d) => (process.env[k] != null && process.env[k] !== "" ? process.env[k] : d);
+const num = (k, d) => Number(env(k, d));
+const flag = (k, d = false) => { const v = env(k, null); return v == null ? d : ["1", "true", "yes"].includes(String(v).toLowerCase()); };
+
+export const SCRIPTS = ["p2wsh-ecdsa", "p2mr-slhdsa"];
+export const REORG_MODELS = ["btc-subsidy", "conftarget-rpc", "fixed"];
+
+// Presets for the second slot. `bip110` is a POLICY/PoW fork of Bitcoin (Blake2b PoW, 164-byte v2
+// headers — both invisible at the RPC/tx layer we use): tx format, script rules, and ECDSA sighash are
+// stock Bitcoin, so the standard P2WSH HTLC family applies as-is.
+const CHAIN2_PRESETS = {
+  qbit:   { label: "QBT",  hrp: "qbrt", blockSecs: 60,  minSats: 200000, minConfs: 1, script: "p2mr-slhdsa", reorgModel: "conftarget-rpc", fixedConfs: 6,  btcReplay: false },
+  bip110: { label: "B110", hrp: "bc",   blockSecs: 600, minSats: 50000,  minConfs: 1, script: "p2wsh-ecdsa", reorgModel: "fixed",          fixedConfs: 12, btcReplay: true },
+};
+export const chain2Preset = () => env("CHAIN2", "qbit");
+
+export function chainCfg(leg) {
+  const p = CHAIN2_PRESETS[chain2Preset()];
+  if (!p) throw new Error(`CHAIN2="${chain2Preset()}" — unknown preset (${Object.keys(CHAIN2_PRESETS).join("|")})`);
+  if (leg === "btc") return {
+    label: env("BTC_LABEL", "BTC"),
+    hrp: env("BTC_HRP", "bcrt"),
+    blockSecs: num("BTC_BLOCK_SECS", 600),
+    minSats: num("MIN_BTC_SATS", 50000),
+    minConfs: num("MIN_CONFS_BTC", 1),
+    script: env("BTC_SCRIPT", "p2wsh-ecdsa"),
+    reorgModel: env("BTC_REORG_MODEL", "btc-subsidy"),
+    fixedConfs: num("BTC_FIXED_CONFS", 6),
+    trustUnconfirmed: flag("BTC_TRUST_UNCONFIRMED"),
+    replayOpReturn: flag("BTC_REPLAY_OPRETURN", p.btcReplay),   // preset default: ON for the bip110 pair
+  };
+  // second slot: preset base, env overrides (ALT_* preferred; legacy QBIT_*/MIN_QBT_SATS still honored)
+  const alt = (k, legacyK, d) => env(`ALT_${k}`, env(legacyK, d));
+  return {
+    label: alt("LABEL", "QBIT_LABEL", p.label),
+    hrp: alt("HRP", "QBIT_HRP", p.hrp),
+    blockSecs: Number(alt("BLOCK_SECS", "QBIT_BLOCK_SECS", p.blockSecs)),
+    minSats: Number(alt("MIN_SATS", "MIN_QBT_SATS", p.minSats)),
+    minConfs: Number(alt("MIN_CONFS", "MIN_CONFS_QBIT", p.minConfs)),
+    script: alt("SCRIPT", "QBIT_SCRIPT", p.script),
+    reorgModel: alt("REORG_MODEL", "QBIT_REORG_MODEL", p.reorgModel),
+    fixedConfs: Number(alt("FIXED_CONFS", "QBIT_FIXED_CONFS", p.fixedConfs)),
+    trustUnconfirmed: flag("ALT_TRUST_UNCONFIRMED") || flag("QBIT_TRUST_UNCONFIRMED"),
+    replayOpReturn: flag("ALT_REPLAY_OPRETURN") || flag("QBIT_REPLAY_OPRETURN"),
+  };
+}
+// The public projection clients configure themselves from (GET /chains, serve.js injection, view).
+export const publicChains = () => Object.fromEntries(["btc", "qbit"].map((leg) => {
+  const { label, hrp, blockSecs, minSats, script, trustUnconfirmed, replayOpReturn } = chainCfg(leg);
+  return [leg, { label, hrp, blockSecs, minSats, script, trustUnconfirmed, replayOpReturn }];
+}));
+
+// Validate once at startup — catch a typo'd preset/script/model before any swap derives from it.
+export function validateChains() {
+  chainCfg("btc");   // throws on an unknown CHAIN2
+  for (const leg of ["btc", "qbit"]) {
+    const c = chainCfg(leg);
+    if (!SCRIPTS.includes(c.script)) throw new Error(`${leg}: unknown script family "${c.script}" (${SCRIPTS.join("|")})`);
+    if (!REORG_MODELS.includes(c.reorgModel)) throw new Error(`${leg}: unknown reorg model "${c.reorgModel}" (${REORG_MODELS.join("|")})`);
+    if (!(c.blockSecs > 0) || !(c.minSats > 0) || !(c.minConfs >= 0) || !(c.fixedConfs > 0)) throw new Error(`${leg}: blockSecs/minSats/minConfs/fixedConfs must be positive`);
+    if (c.trustUnconfirmed) console.error(`[chains] ⚠ ${leg} (${c.label}): TRUST-UNCONFIRMED ON — 0-conf deposits treated as final; safe only between trusted parties`);
+    if (c.replayOpReturn) console.error(`[chains] ${leg} (${c.label}): replay protection ON — sweeps must carry a >83-byte OP_RETURN`);
+  }
+  const [b, q] = [chainCfg("btc"), chainCfg("qbit")];
+  console.log(`[chains] pair: ${b.label} (${b.script}) ⇄ ${q.label} (${q.script}) · CHAIN2=${chain2Preset()}`);
+}
+// Re-export the client lib's marker (single source of truth for coordinator enforcement + tests).
+export const replayMarkerSpk = clientReplayMarkerSpk;
+// Does a parsed tx's output set carry the replay marker? (any OP_RETURN whose total spk exceeds the
+// 83-byte datacarrier cap + overhead — i.e. a payload BIP-110 policy will not relay/mine.)
+export const hasReplayMarker = (txOuts) => txOuts.some(([, spk]) => spk[0] === 0x6a && spk.length > 85);

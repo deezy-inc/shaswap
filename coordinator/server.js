@@ -5,6 +5,9 @@ import http from "node:http";
 import { createSwap, getSwap, roleOf, submitParty, broadcast, view, poll, allSwaps, subscribe, markSeen, addConnection, dropConnection, sweepPresence, submitFinish, driveWatchtower, cancelSwap, evictSettled, recentComplete } from "./swap.js";
 import { createOffer, getOffer, isMaker, book, takeOffer, cancelOffer, makerView } from "./offers.js";
 import { rfqEnabled, makerByKey, submitQuote, pendingMatches, depth, bestQuote, publicQuote, takeRfq, planFill, publicPlan, takeFill, RFQ_TTL_MS } from "./rfq.js";
+import { validateChains, publicChains } from "./chains.js";
+
+validateChains();   // refuse to start on a typo'd CHAIN2 / script family / reorg model
 import { btc } from "./chain.js";
 import { btcFeerates, qbitFeerates, cachedBtcFeerates, cachedQbitFeerates } from "./fees.js";
 
@@ -51,6 +54,10 @@ async function handle(req, res) {
     // Public per-chain feerates (same cache the swap view uses) so the app can estimate the on-chain
     // claim fee on the setup screen, before any swap exists. No secrets.
     if (method === "GET" && url.pathname === "/feerates") return json(res, 200, { btc: cachedBtcFeerates(), qbit: cachedQbitFeerates() });
+
+    // Public chain-pair config: what each leg IS (label/hrp/script family/flags) — clients configure
+    // their keys, signers, and sweep shape from this instead of assuming btc/qbit.
+    if (method === "GET" && url.pathname === "/chains") return json(res, 200, publicChains());
 
     // Public recent-trades feed (only successfully settled swaps; no per-party secrets).
     if (method === "GET" && url.pathname === "/trades") {

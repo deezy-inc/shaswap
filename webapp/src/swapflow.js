@@ -18,12 +18,16 @@ import {
 const rand = (n) => globalThis.crypto.getRandomValues(new Uint8Array(n));
 
 export class SwapClient {
-  constructor({ coordinator, onUpdate = () => {}, feeSats = { qbit: 100000, btc: 5000 }, btcHrp = "bc", qbitHrp = "qb" }) {
+  constructor({ coordinator, onUpdate = () => {}, feeSats = { qbit: 100000, btc: 5000 }, btcHrp = "bc", qbitHrp = "qb", chains = null }) {
     this.base = coordinator.replace(/\/$/, "");
     this.onUpdate = onUpdate;
     this.feeSats = feeSats;
     this.acted = new Set();
     this.createdAt = Date.now();   // when this swap was started here (restored on resume; used in the recover list)
+    // Per-leg chain identity ({ btc, qbit } slots → label/script family/replay flags). The "qbit" slot
+    // may be ANY Core-RPC UTXO chain (e.g. the BIP-110/Blake2b BTC fork → p2wsh-ecdsa on both legs);
+    // injected (window.QBIT_CHAINS), fetched from GET /chains before keygen, and refreshed by the view.
+    this.chains = chains || globalThis.QBIT_CHAINS || null;
     // Direct-broadcast fallback endpoints for the coordinator-down path (see #send), keyed by network.
     // BOTH chains are openly relayable — this browser can push a signed tx straight to a public node on
     // either leg — so we keep a fallback for each. QBT is no more "coordinator-only" than BTC; swap safety
@@ -31,6 +35,10 @@ export class SwapClient {
     this.btcBroadcast = BTC_BROADCAST[btcHrp] || [];
     this.qbitBroadcast = QBIT_BROADCAST[qbitHrp] || [];
   }
+  // The leg's HTLC script family / replay-protection flag — from the freshest source available.
+  famOf(leg) { return (this.view?.chains || this.chains)?.[leg]?.script || (leg === "qbit" ? "p2mr-slhdsa" : "p2wsh-ecdsa"); }
+  replayOf(leg) { return !!(this.view?.chains || this.chains)?.[leg]?.replayOpReturn; }
+  async #ensureChains() { if (!this.chains) this.chains = await this.#api("/chains").catch(() => null); }
 
   // Retries transient failures (network drop, coordinator restart/blip, 5xx/429) so an in-flight
   // create/join/submit isn't lost to a momentary outage. A definitive 4xx (business error) is thrown
@@ -49,8 +57,12 @@ export class SwapClient {
   }
 
   // ── identity / persistence ───────────────────────────────────────────────────
+  // The "qbit"-slot keypair matches its configured script family: SLH-DSA for p2mr, a secp256k1 pair
+  // for a p2wsh-ecdsa second chain (fork pairs) — either way it travels as { pk, sk } under qbitPub.
   async #freshKeys(isInitiator) {
-    this.qbit = await slhDsaKeygen(rand(128));
+    await this.#ensureChains();
+    if (this.famOf("qbit") === "p2mr-slhdsa") this.qbit = await slhDsaKeygen(rand(128));
+    else { const sk = rand(32); this.qbit = { sk, pk: compressedPub(sk) }; }
     this.btcPriv = rand(32);
     if (isInitiator) { this.secret = rand(32); this.H = sha256(this.secret); }   // only the initiator (alice) holds the secret
   }
@@ -96,6 +108,7 @@ export class SwapClient {
     this.id = id; this.token = token; this.btcDest = btcDest; this.qbitDest = qbitDest;
     const pre = await this.#api(`/swaps/${id}`, { token });
     this.role = pre.role; this.direction = pre.direction || "btc2qbt";
+    if (pre.chains) this.chains = pre.chains;   // the swap view is authoritative for the pair's identity
     await this.#freshKeys(this.role === "alice");
     const v = await this.#submit();
     this.terms = { btcSats: v.terms?.btcSats, qbtSats: v.terms?.qbtSats };
@@ -156,9 +169,9 @@ export class SwapClient {
       const self = { qbit: this.qbit.pk, btc: compressedPub(this.btcPriv) };
       const cp = { qbit: bin(v.counterparty.qbitPub), btc: bin(v.counterparty.btcPub) };
       const pk = (role, coin) => (role === this.role ? self[coin] : cp[coin]);
-      const spk = (leg, claimRole, refundRole) => leg === "qbit"
-        ? hex(p2mrSpk(htlcLeafQbit(H, pk(claimRole, "qbit"), pk(refundRole, "qbit"), v.locktimes.qbit)))
-        : hex(p2wshSpk(htlcWitnessScript(H, pk(claimRole, "btc"), pk(refundRole, "btc"), v.locktimes.btc)));
+      const spk = (leg, claimRole, refundRole) => this.famOf(leg) === "p2mr-slhdsa"
+        ? hex(p2mrSpk(htlcLeafQbit(H, pk(claimRole, leg), pk(refundRole, leg), v.locktimes[leg])))
+        : hex(p2wshSpk(htlcWitnessScript(H, pk(claimRole, leg), pk(refundRole, leg), v.locktimes[leg])));
       // deriveHtlcs: fromLeg claim=participant(bob)/refund=initiator(alice); toLeg claim=alice/refund=bob
       return spk(fromLeg, "bob", "alice") === v.htlc[fromLeg].spk && spk(toLeg, "alice", "bob") === v.htlc[toLeg].spk;
     } catch { return false; }
@@ -265,7 +278,12 @@ export class SwapClient {
   }
 
   // ── signing (leg-generic; build a tx at a given fee, then optionally broadcast) ──
-  #build(v, leg, kind, preimage, feeSats) { return leg === "qbit" ? this.#buildQbit(v, kind, preimage, feeSats) : this.#buildBtc(v, kind, preimage, feeSats); }
+  // Dispatch on the leg's SCRIPT FAMILY, not its slot name — a fork pair signs P2WSH+ECDSA on BOTH legs.
+  #build(v, leg, kind, preimage, feeSats) { return this.famOf(leg) === "p2mr-slhdsa" ? this.#buildP2mr(v, leg, kind, preimage, feeSats) : this.#buildP2wsh(v, leg, kind, preimage, feeSats); }
+  // Slot-shaped accessors: which of our dests/keys serves a given leg (the qbit-slot key is SLH-DSA or
+  // secp depending on the slot's family; both live in this.qbit).
+  #destOf(leg) { return leg === "btc" ? this.btcDest : this.qbitDest; }
+  #privOf(leg) { return leg === "btc" ? this.btcPriv : this.qbit.sk; }
   // Live claim/refund the party signs itself: size the BTC fee at mempool's High-priority tier
   // (v.feerates.fastestFee) so it confirms promptly — the pre-signed fee ladder is only the fallback
   // the watchtower uses when this party is OFFLINE. Never let the fee eat the output below dust.
@@ -284,30 +302,32 @@ export class SwapClient {
     return { leg, hex: hex(await this.#build(v, leg, kind, preimage, this.#liveFee(v, leg, kind))) };
   }
 
-  async #buildQbit(v, kind, preimage, feeSats) {
-    const f = v.funding.qbit || v.shortFunded?.qbit, leaf = bin(v.htlc.qbit.leaf), spk = bin(v.htlc.qbit.spk);   // shortFunded → refund an underfunded deposit
-    const destSpk = addressToScriptPubKey(this.qbitDest), prevoutLE = bin(f.txid).reverse(), outVal = f.amountSats - feeSats;
-    const refund = kind === "refund", lock = refund ? v.locktimes.qbit : 0, seq = refund ? 0xfffffffe : 0xffffffff;
+  async #buildP2mr(v, leg, kind, preimage, feeSats) {
+    const f = v.funding[leg] || v.shortFunded?.[leg], leaf = bin(v.htlc[leg].leaf), spk = bin(v.htlc[leg].spk);   // shortFunded → refund an underfunded deposit
+    const destSpk = addressToScriptPubKey(this.#destOf(leg)), prevoutLE = bin(f.txid).reverse(), outVal = f.amountSats - feeSats;
+    const refund = kind === "refund", lock = refund ? v.locktimes[leg] : 0, seq = refund ? 0xfffffffe : 0xffffffff;
     const sh = p2mrSighash({ version: 2, locktime: lock, vin: [{ txidLE: prevoutLE, vout: f.vout, sequence: seq }], spentOutputs: [{ amount: f.amountSats, spk }], vout: [{ value: outVal, spk: destSpk }], inputIndex: 0, leafScript: leaf });
     const sig = await slhDsaSign(this.qbit.sk, sh);
     const witIf = refund ? new Uint8Array(0) : preimage;           // ELSE(refund)=empty ; IF(claim)=preimage (empty placeholder when pre-signing preimage-less)
     const wit = refund ? [sig, witIf, leaf, P2MR_CONTROL_SINGLE_LEAF] : [sig, witIf, Uint8Array.of(0x01), leaf, P2MR_CONTROL_SINGLE_LEAF];
     return serializeTx({ version: 2, vin: [[prevoutLE, f.vout, new Uint8Array(0), seq]], vout: [[BigInt(outVal), destSpk]], wit: [wit], locktime: lock });
   }
-  async #buildBtc(v, kind, preimage, feeSats) {
-    const f = v.funding.btc || v.shortFunded?.btc, ws = bin(v.htlc.btc.witnessScript), destSpk = addressToScriptPubKey(this.btcDest);   // shortFunded → refund an underfunded deposit
+  async #buildP2wsh(v, leg, kind, preimage, feeSats) {
+    const f = v.funding[leg] || v.shortFunded?.[leg], ws = bin(v.htlc[leg].witnessScript), destSpk = addressToScriptPubKey(this.#destOf(leg));   // shortFunded → refund an underfunded deposit
     const branch = kind === "refund" ? "refund" : "claim";
-    // Coordinator fee: on a successful BTC claim, add a second output paying the coordinator's fee
-    // address. The buyer funded it on top of the swap amount, so the seller still nets the full swap
-    // amount; the claim's own network fee (feeSats) is taken out of the fee output (per policy). No fee
-    // on refunds. Dropped if it would be dust (claim still confirms; the fee is just skipped that time).
+    // Coordinator fee: on a successful BTC-SLOT claim, add a second output paying the coordinator's fee
+    // address (the fee always rides the btc slot). The buyer funded it on top of the swap amount, so the
+    // seller still nets the full swap amount; the claim's own network fee (feeSats) is taken out of the
+    // fee output. No fee on refunds; dropped if it would be dust.
     let extraOut = null, outVal = f.amountSats - feeSats;   // no coordinator fee → the claimer pays the network fee from its own amount
-    if (branch === "claim" && v.fee?.sats > 0 && v.fee.address) {
+    if (leg === "btc" && branch === "claim" && v.fee?.sats > 0 && v.fee.address) {
       const split = btcClaimSplit(f.amountSats, feeSats, v.fee.sats);   // seller stays whole; network fee capped at the reserve
       outVal = split.outVal;
       if (split.feeOut != null) extraOut = { spk: addressToScriptPubKey(v.fee.address), value: split.feeOut };
     }
-    return btcSpend({ prevTxidLE: bin(f.txid).reverse(), vout: f.vout, amount: f.amountSats, ws, priv: this.btcPriv, destSpk, outVal, branch, preimage, locktime: branch === "refund" ? v.locktimes.btc : 0, extraOut });
+    // Fork replay protection: on a flagged leg every sweep carries the >83-byte OP_RETURN marker (the
+    // coordinator refuses marker-less sweeps there; BIP-110 policy keeps the tx off the fork chain).
+    return btcSpend({ prevTxidLE: bin(f.txid).reverse(), vout: f.vout, amount: f.amountSats, ws, priv: this.#privOf(leg), destSpk, outVal, branch, preimage, locktime: branch === "refund" ? v.locktimes[leg] : 0, extraOut, replay: this.replayOf(leg) });
   }
 }
 
@@ -357,15 +377,18 @@ export async function postRawTx(endpoints, txHex, fetchImpl = fetch) {
   throw lastErr || new Error("no reachable broadcast endpoint");
 }
 const LADDER = { btc: [2, 8, 25, 75, 200], qbit: [1, 5] };
-// vsize per sweep (measured on regtest). IMPORTANT: Qbit's SLH-DSA witness gets NO segwit discount
-// (vsize == weight ≈ 3.9k vB), so these must be the real sizes — a low estimate underpays the feerate
-// and the tx can stall. Slightly conservative (real: qbit ~3900, btc refund ~130) so a floored fee
-// still clears relay.
-const VBYTES = { btc: { claim: 165, refund: 140 }, qbit: { claim: 4200, refund: 4200 } };
+// vsize per sweep, by SCRIPT FAMILY (measured on regtest). IMPORTANT: SLH-DSA witnesses get NO segwit
+// discount (vsize == weight ≈ 3.9k vB), so those must be the real sizes — a low estimate underpays the
+// feerate and the tx can stall. A p2wsh-ecdsa second leg (fork pair) sizes like Bitcoin.
+const FAMILY_VBYTES = { "p2wsh-ecdsa": { claim: 165, refund: 140 }, "p2mr-slhdsa": { claim: 4200, refund: 4200 } };
+const legFam = (leg) => globalThis.QBIT_CHAINS?.[leg]?.script || (leg === "qbit" ? "p2mr-slhdsa" : "p2wsh-ecdsa");
+const VBYTES = { get btc() { return FAMILY_VBYTES[legFam("btc")]; }, get qbit() { return FAMILY_VBYTES[legFam("qbit")]; } };
 // Marginal vsize of the coordinator-fee output (a P2TR output ≈ 43 vB), added to a BTC claim that
-// carries one so the network fee is sized for the real 2-output transaction.
-const FEE_OUT_VB = 43;
-const feeVbytes = (v, leg, kind) => (leg === "btc" && kind === "claim" && v.fee?.sats > 0 ? FEE_OUT_VB : 0);
+// carries one; and of the replay-protection OP_RETURN (103-byte spk ≈ 112 vB) on a flagged leg — both
+// so the network fee is sized for the real transaction.
+const FEE_OUT_VB = 43, REPLAY_VB = 112;
+const feeVbytes = (v, leg, kind) => (leg === "btc" && kind === "claim" && v.fee?.sats > 0 ? FEE_OUT_VB : 0)
+  + ((v.chains?.[leg]?.replayOpReturn || globalThis.QBIT_CHAINS?.[leg]?.replayOpReturn) ? REPLAY_VB : 0);
 // Absolute fee floor (sats): never pay below the node's own min-relay feerate for this tx's size
 // (`feerates.<leg>.minimumFee` — BTC from mempool.space, Qbit from getmempoolinfo). No hardcoded floor.
 const relayFloor = (leg, kind, feerates, extraVb = 0) => Math.ceil(Math.max(1, feerates?.[leg]?.minimumFee || 1) * (VBYTES[leg][kind] + extraVb));

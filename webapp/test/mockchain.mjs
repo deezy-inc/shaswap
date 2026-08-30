@@ -21,11 +21,13 @@ export class MockChain {
     this.spentBy = new Map();    // `${txid}:${vout}` -> spending txid (for spendingTxid)
   }
   register(address, spkHex) { this.addr.set(address, spkHex); return this; }
-  mine(n = 1) { this.height += n; return this.height; }
-  // A wallet "send" to an spk: mint a fresh confirmed UTXO. Returns the funding txid.
-  fundSpk(spkHex, amountSats) {
+  // Mining confirms any mempool-only ({ mempool: true }) UTXOs at the new height.
+  mine(n = 1) { this.height += n; for (const u of this.utxo.values()) if (u.height == null) u.height = this.height; return this.height; }
+  // A wallet "send" to an spk: mint a fresh UTXO — confirmed at the current height by default, or
+  // mempool-only (height null → the coordinator sees it `unconfirmed`) with { mempool: true }.
+  fundSpk(spkHex, amountSats, { mempool = false } = {}) {
     const txid = txidOf(rand(32)), key = `${txid}:0`;
-    this.utxo.set(key, { txid, vout: 0, spkHex, amountSats, height: this.height, spent: false });
+    this.utxo.set(key, { txid, vout: 0, spkHex, amountSats, height: mempool ? null : this.height, spent: false });
     return txid;
   }
   fundAddr(address, amountSats) {

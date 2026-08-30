@@ -17,6 +17,7 @@ import { dirname, join, extname } from "node:path";
 import { startServer } from "../../coordinator/server.js";
 import { startAdmin } from "../../coordinator/admin.js";
 import { MIN_SATS } from "../../coordinator/swap.js";   // single source of truth for the min swap value (env-driven)
+import { publicChains } from "../../coordinator/chains.js";   // per-leg chain identity (CHAIN2 preset) — injected so keys/signing/replay match the pair
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PUBLIC_URL = (process.env.PUBLIC_URL || "http://127.0.0.1:8080").replace(/\/$/, "");
@@ -34,7 +35,8 @@ const hrps = HRPS[NETWORK] || HRPS.regtest;
 const cfg = [
   `window.QBIT_COORDINATOR=${JSON.stringify(`${PUBLIC_URL}/coord`)};`,
   `window.QBIT_HRPS=${JSON.stringify(hrps)};`,
-  `window.QBIT_MIN_SATS=${JSON.stringify(MIN_SATS)};`,   // min swap value — the app validates against the SAME config the coordinator enforces
+  `window.QBIT_MIN_SATS=${JSON.stringify({ btc: MIN_SATS.btc, qbit: MIN_SATS.qbit })};`,   // min swap value — the app validates against the SAME config the coordinator enforces
+  `window.QBIT_CHAINS=${JSON.stringify(publicChains())};`,   // per-leg identity: labels, script family, trust/replay flags (CHAIN2 pair)
   process.env.ORDERBOOK ? "window.QBIT_ORDERBOOK=true;" : "",
   process.env.RECENT_TRADES ? "window.QBIT_RECENT_TRADES=true;" : "",
   process.env.RFQ ? "window.QBIT_RFQ=true;" : "",   // instant-swap widget (needs RFQ_MAKER_KEYS on the coordinator to actually serve liquidity)

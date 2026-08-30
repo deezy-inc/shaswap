@@ -52,6 +52,32 @@ export class MakerBot {
   }
   #ev(type, data) { try { this.onEvent?.(type, data); } catch { /* observer must never break the bot */ } }
 
+  // ── chain-pair awareness (fork pairs) ────────────────────────────────────────────────────────────
+  // The coordinator's second slot may be any Core-RPC UTXO chain (CHAIN2=qbit|bip110). Fetch the pair
+  // config once; keys and sweeps on the "qbit" slot follow its SCRIPT FAMILY, and sweeps on a
+  // replay-protected leg carry the >83-byte OP_RETURN marker (the coordinator enforces it).
+  async #pairCfg() { return (this.chains ||= await this.#api("/chains").catch(() => null)); }
+  #famQbit() { return this.chains?.qbit?.script || "p2mr-slhdsa"; }
+  #replayOf(leg) { return !!this.chains?.[leg]?.replayOpReturn; }
+  async #qbitKeys() {
+    await this.#pairCfg();
+    if (this.#famQbit() === "p2mr-slhdsa") return slhDsaKeygen(cryptoRandom(128));
+    const sk = cryptoRandom(32); return { sk, pk: compressedPub(sk) };       // p2wsh-ecdsa second chain
+  }
+  // P2WSH sweep of the SECOND slot (fork pairs): same shape as the btc-slot spends, keyed by the
+  // qbit-slot keypair, with the leg's replay marker when flagged. No coordinator-fee output here.
+  async #altP2wshSweep({ id, token, v, qbit, destSpk, kind, preimage }) {
+    const f = v.funding.qbit, ws = bin(v.htlc.qbit.witnessScript);
+    const tx = btcSpend({
+      prevTxidLE: bin(f.txid).reverse(), vout: f.vout, amount: f.amountSats, ws, priv: qbit.sk,
+      destSpk, outVal: f.amountSats - this.feeSats.qbit, branch: kind, preimage,
+      locktime: kind === "refund" ? v.locktimes.qbit : 0, replay: this.#replayOf("qbit"),
+    });
+    const r = await this.#api(`/swaps/${id}/broadcast`, { token, method: "POST", body: { leg: "qbit", kind, tx: hex(tx) } });
+    this.log(`[maker] ${kind === "claim" ? "claimed" : "refunded"} ${this.chains?.qbit?.label || "ALT"} ${r.txid.slice(0, 12)} -> ${r.state}`);
+    return { accepted: true, outcome: kind === "claim" ? "completed" : "refunded", txid: r.txid };
+  }
+
   async #api(path, { token, method = "GET", body } = {}) {
     const r = await fetch(this.base + path, {
       method,
@@ -202,7 +228,7 @@ export class MakerBot {
   async fulfill({ id, token, saved = null }) {
     // 1) ephemeral, per-swap keys — persisted to the keystore BEFORE any action, so a crash never
     //    strands our ability to claim the BTC or refund the QBT we lock below.
-    const qbit = saved ? { pk: saved.qbitPk, sk: saved.qbitSk } : await slhDsaKeygen(cryptoRandom(128));
+    const qbit = saved ? (await this.#pairCfg(), { pk: saved.qbitPk, sk: saved.qbitSk }) : await this.#qbitKeys();
     const btcPriv = saved ? saved.btcPriv : cryptoRandom(32);
     const btcPub = compressedPub(btcPriv);
     const qbitDest = saved ? saved.qbitDest : await this.wallet.newQbit();     // QBT refund sink (if taker aborts)
@@ -242,7 +268,9 @@ export class MakerBot {
       const v = await this.#api(`/swaps/${id}`, { token });
       if (v.preimage) return this.#done(id, await this.#claimBtc({ id, token, v, btcPriv, destSpk: btcDest.spk }));
       const h = await this.wallet.qbitHeight();
-      if (v.funding?.qbit && h >= v.locktimes.qbit) return this.#done(id, await this.#refundQbit({ id, token, v, qbit, destSpk: qbitDest.spk }));
+      if (v.funding?.qbit && h >= v.locktimes.qbit) return this.#done(id, await (this.#famQbit() === "p2mr-slhdsa"
+        ? this.#refundQbit({ id, token, v, qbit, destSpk: qbitDest.spk })
+        : this.#altP2wshSweep({ id, token, v, qbit, destSpk: qbitDest.spk, kind: "refund", preimage: new Uint8Array(0) })));
       if (["COMPLETE", "REFUNDED", "ABORTED", "CANCELED"].includes(v.state)) return this.#done(id, { accepted: true, outcome: v.state.toLowerCase() });   // settled out from under us (e.g. resumed after our claim landed)
       await sleep(this.pollMs);
     }
@@ -268,7 +296,7 @@ export class MakerBot {
     }
     const tx = btcSpend({
       prevTxidLE: bin(f.txid).reverse(), vout: f.vout, amount: f.amountSats, ws, priv: btcPriv,
-      destSpk, outVal, branch: "claim", preimage: bin(v.preimage), extraOut,
+      destSpk, outVal, branch: "claim", preimage: bin(v.preimage), extraOut, replay: this.#replayOf("btc"),
     });
     const r = await this.#api(`/swaps/${id}/broadcast`, { token, method: "POST", body: { leg: "btc", kind: "claim", tx: hex(tx) } });
     this.log(`[maker] claimed BTC ${r.txid.slice(0, 12)} -> ${r.state}${extraOut ? ` (fee ${extraOut.value} → coordinator)` : ""}`);
@@ -307,7 +335,7 @@ export class MakerBot {
     // 1) ephemeral, per-swap keys — INCLUDING the secret we (the initiator) commit to. All persisted to
     //    the keystore BEFORE any action: losing the secret would make our locked BTC refund-only; losing
     //    the keys would strand it entirely.
-    const qbit = saved ? { pk: saved.qbitPk, sk: saved.qbitSk } : await slhDsaKeygen(cryptoRandom(128));
+    const qbit = saved ? (await this.#pairCfg(), { pk: saved.qbitPk, sk: saved.qbitSk }) : await this.#qbitKeys();
     const btcPriv = saved ? saved.btcPriv : cryptoRandom(32), btcPub = compressedPub(btcPriv);
     const secret = saved ? saved.secret : cryptoRandom(32), H = sha256(secret);
     const qbitDest = saved ? saved.qbitDest : await this.wallet.newQbit();     // where we receive the QBT we're buying
@@ -341,7 +369,9 @@ export class MakerBot {
     //    which the coordinator sets only once BOTH legs are buried and it's still safe (never too late).
     while (true) {
       const v = await this.#api(`/swaps/${id}`, { token });
-      if (v.state === "CLAIMABLE" && v.funding?.qbit) return this.#done(id, await this.#claimQbit({ id, token, v, qbit, secret, destSpk: qbitDest.spk }));
+      if (v.state === "CLAIMABLE" && v.funding?.qbit) return this.#done(id, await (this.#famQbit() === "p2mr-slhdsa"
+        ? this.#claimQbit({ id, token, v, qbit, secret, destSpk: qbitDest.spk })
+        : this.#altP2wshSweep({ id, token, v, qbit, destSpk: qbitDest.spk, kind: "claim", preimage: secret })));
       const h = await this.wallet.btcHeight();
       if (v.funding?.btc && !v.funding.btc.spent && !v.preimage && h >= v.locktimes.btc) return this.#done(id, await this.#refundBtc({ id, token, v, btcPriv, destSpk: btcDest.spk }));
       if (["COMPLETE", "REFUNDED", "ABORTED", "CANCELED"].includes(v.state)) return this.#done(id, { accepted: true, outcome: v.state.toLowerCase() });
@@ -394,7 +424,7 @@ export class MakerBot {
     const f = v.funding.btc, ws = bin(v.htlc.btc.witnessScript);
     const tx = btcSpend({
       prevTxidLE: bin(f.txid).reverse(), vout: f.vout, amount: f.amountSats, ws, priv: btcPriv,
-      destSpk, outVal: f.amountSats - this.feeSats.btc, branch: "refund", locktime: v.locktimes.btc,
+      destSpk, outVal: f.amountSats - this.feeSats.btc, branch: "refund", locktime: v.locktimes.btc, replay: this.#replayOf("btc"),
     });
     const r = await this.#api(`/swaps/${id}/broadcast`, { token, method: "POST", body: { leg: "btc", kind: "refund", tx: hex(tx) } });
     this.log(`[maker] refunded BTC ${r.txid.slice(0, 12)} -> ${r.state}`);

@@ -24,6 +24,7 @@ import { qbit, btc } from "./chain.js";
 import { btcFeerates, cachedBtcFeerates, cachedQbitFeerates } from "./fees.js";
 import { feeAddress, validateFeeKey } from "./feeaddr.js";
 import { makeStore } from "./store.js";
+import { chainCfg, publicChains, hasReplayMarker } from "./chains.js";
 
 export const States = ["CREATED", "READY", "FROM_FUNDED", "TO_FUNDED", "MATURING", "CLAIMABLE", "CLAIMED", "COMPLETE", "REFUNDED", "ABORTED"];
 const TERMINAL = ["COMPLETE", "REFUNDED", "ABORTED"];
@@ -121,11 +122,11 @@ export function sweepPresence() {
   }
 }
 
-export const MIN_SATS = { btc: Number(process.env.MIN_BTC_SATS || 50000), qbit: Number(process.env.MIN_QBT_SATS || 200000) };   // above the largest claim/refund fee + dust; the web app reads these (injected) so its up-front check matches this authority
-
-// Network hrp for the HTLC deposit addresses the coordinator hands out. MUST match the deploy network
-// (regtest bcrt/qbrt · testnet tb/tqb · mainnet bc/qb) or users get an unspendable address.
-const HRP = { btc: process.env.BTC_HRP || "bcrt", qbit: process.env.QBIT_HRP || "qbrt" };
+// Per-leg chain identity (label, hrp, block time, min sats/confs, script family, reorg model, trust +
+// replay flags) lives in chains.js — the "qbit" slot is configurable to any Core-RPC UTXO chain
+// (CHAIN2=qbit|bip110). These are thin accessors so a config change needs no edits here.
+export const MIN_SATS = { get btc() { return chainCfg("btc").minSats; }, get qbit() { return chainCfg("qbit").minSats; } };   // above the largest claim/refund fee + dust; the web app reads these (injected) so its up-front check matches this authority
+const HRP = { get btc() { return chainCfg("btc").hrp; }, get qbit() { return chainCfg("qbit").hrp; } };   // MUST match the deploy network or users get an unspendable address
 
 // ── coordinator fee (optional, default OFF) ────────────────────────────────────────────────────
 // A fee charged ON TOP of the buyer's BTC deposit and paid to a FRESH watch-only taproot address per
@@ -213,7 +214,7 @@ function deriveFee(btcSats) {
 // BTC (~10 min) and QBT (~60 s) have very different block times, so a fixed BLOCK count would invert
 // this ordering in one direction. We instead pick wall-clock windows and convert each to that chain's
 // block count via its block time. For regtest the lab sets tiny values so tests stay fast.
-const BLOCK_SECS = { btc: Number(process.env.BTC_BLOCK_SECS || 600), qbit: Number(process.env.QBIT_BLOCK_SECS || 60) };
+const BLOCK_SECS = { get btc() { return chainCfg("btc").blockSecs; }, get qbit() { return chainCfg("qbit").blockSecs; } };
 const locktimeBlocks = (leg, secs) => Math.max(1, Math.ceil(secs / BLOCK_SECS[leg]));
 
 // ── Value-scaled reorg security + timelocks ──────────────────────────────────────────────────
@@ -225,7 +226,7 @@ const locktimeBlocks = (leg, secs) => Math.max(1, Math.ceil(secs / BLOCK_SECS[le
 // BTC value by REORG_MARGIN×. Timelocks are then derived from the resulting confirmation count, so a
 // small swap settles + refunds fast while a large one gets deeper confirmations and longer windows.
 const REORG_MARGIN = Number(process.env.REORG_MARGIN || 3);                 // cost-to-reorg ≥ this × swap value
-const MIN_CONFS = { btc: Number(process.env.MIN_CONFS_BTC || 1), qbit: Number(process.env.MIN_CONFS_QBIT || 1) };   // never 0-conf, but otherwise let the value-scaled math decide
+const MIN_CONFS = { get btc() { return chainCfg("btc").minConfs; }, get qbit() { return chainCfg("qbit").minConfs; } };   // never 0-conf (unless trustUnconfirmed), but otherwise let the value-scaled math decide
 const UNPRICED_CONFS = Number(process.env.UNPRICED_CONFS || 6);   // conservative fallback when the reorg cost can't be priced (node model unavailable)
 // Funding deadline: once the HTLCs are derived (READY), both parties must fund within this window, or
 // the swap is treated as expired — because the timelocks are fixed at READY time, funding much later
@@ -239,21 +240,29 @@ const FROM_GAP_SECS = Number(process.env.HTLC_FROM_GAP_SECS || 7200);       // e
 const MIN_TO_SECS = Number(process.env.MIN_TO_SECS || 10800);              // floor on the toLeg window (3h)
 const btcSubsidySats = (h) => Math.floor(5_000_000_000 / 2 ** Math.floor(h / 210_000));   // BTC block reward at height h
 
-// Confirmations the initiator's claimed leg (toLeg) must reach so that reorging it costs ≥ REORG_MARGIN
-// × the swap's BTC value. Priced per confirmation in BTC; floored at MIN_CONFS for natural-orphan safety.
-async function reorgConfs(toLeg, btcSats, qbtSats, level, btcHeight) {
+// Confirmations a leg must reach so that reorging it costs ≥ REORG_MARGIN × the swap's BTC value —
+// priced per the leg's configured reorg model, floored at its MIN_CONFS:
+//   "conftarget-rpc" — the node's own getconfirmationtarget chainwork model (qbit's AuxPoW-aware RPC),
+//                      converted to BTC via security_per_confirmation × the BTC subsidy;
+//   "btc-subsidy"    — SHA-256d BTC-family: reorging one block ≈ one BTC block subsidy of work;
+//   "fixed"          — a flat, configured depth for chains whose reorg cost can't be priced (young or
+//                      exotic hashrate markets — e.g. the Blake2b fork; value scaling doesn't apply).
+async function reorgConfs(leg, btcSats, qbtSats, level, btcHeight) {
+  const cfg = chainCfg(leg);
+  if (cfg.reorgModel === "fixed")
+    return { confs: Math.max(MIN_CONFS[leg], cfg.fixedConfs), source: "fixed", level, valueBtcSats: btcSats };
   const btcSub = btcSubsidySats(btcHeight);
-  let costPerConf, extra = {};                                             // BTC sats to reorg one toLeg confirmation
-  if (toLeg === "qbit") {
-    const t = await qbit.confTarget(qbtSats, level);
+  let costPerConf, extra = {};                                             // BTC sats to reorg one confirmation of this leg
+  if (cfg.reorgModel === "conftarget-rpc") {
+    const t = await chainOf(leg).confTarget(qbtSats, level);
     const spc = t.model?.security_per_confirmation || (t.confs ? (t.equivalentBtcConfs || 6) / t.confs : 0);
     costPerConf = spc * btcSub;
     extra = { securityPerConf: spc, hashrate: t.model?.total_observed_hashrate };
   } else {
-    costPerConf = btcSub;                                                   // reorging one BTC block ≈ one BTC subsidy of work
+    costPerConf = btcSub;                                                   // "btc-subsidy": one block ≈ one BTC subsidy of work
   }
-  const need = costPerConf > 0 ? Math.max(MIN_CONFS[toLeg], Math.ceil((REORG_MARGIN * btcSats) / costPerConf)) : UNPRICED_CONFS;
-  return { confs: need, source: toLeg === "qbit" ? "reorg-cost" : "btc-depth", level, valueBtcSats: btcSats, costPerConfSats: Math.round(costPerConf), ...extra };
+  const need = costPerConf > 0 ? Math.max(MIN_CONFS[leg], Math.ceil((REORG_MARGIN * btcSats) / costPerConf)) : UNPRICED_CONFS;
+  return { confs: need, source: cfg.reorgModel === "conftarget-rpc" ? "reorg-cost" : "btc-depth", level, valueBtcSats: btcSats, costPerConfSats: Math.round(costPerConf), ...extra };
 }
 
 // Wall-clock timelock windows derived from the gate's maturity (or forced fixed via env, for regtest).
@@ -273,7 +282,7 @@ export function createSwap({ btcSats, qbtSats, securityLevel = "high" }) {
   // Reject dust-level swaps: the amount must comfortably exceed claim/refund fees (incl. the top
   // watchtower fee tier) or the spend would produce a dust/negative output.
   const minAmt = (n) => (n / 1e8).toFixed(8).replace(/\.?0+$/, "");   // sats → BTC/QBT decimal, no trailing zeros
-  if (!(btcSats >= MIN_SATS.btc) || !(qbtSats >= MIN_SATS.qbit)) throw new Error(`amount too small (minimum ${minAmt(MIN_SATS.btc)} BTC and ${minAmt(MIN_SATS.qbit)} QBT)`);
+  if (!(btcSats >= MIN_SATS.btc) || !(qbtSats >= MIN_SATS.qbit)) throw new Error(`amount too small (minimum ${minAmt(MIN_SATS.btc)} ${chainCfg("btc").label} and ${minAmt(MIN_SATS.qbit)} ${chainCfg("qbit").label})`);
   const s = {
     id: token(), tokens: { alice: token(), bob: token() },
     terms: { btcSats, qbtSats, securityLevel, direction },
@@ -356,15 +365,17 @@ async function deriveHtlcs(s) {
 
   // Per leg: claim party + refund party. On fromLeg, participant claims (with public secret) &
   // initiator refunds. On toLeg, initiator claims (revealing secret) & participant refunds.
+  // The SCRIPT FAMILY is per-leg config, not per-leg-name: a fork pair runs P2WSH+ECDSA on BOTH legs
+  // (each party's qbitPub then carries a secp pubkey for the second chain, not an SLH-DSA key).
   const pub = (party, leg) => bin(leg === "qbit" ? s.party[party].qbitPub : s.party[party].btcPub);
-  const build = (leg, claimParty, refundParty) => leg === "qbit"
-    ? htlcLeafQbit(H, pub(claimParty, "qbit"), pub(refundParty, "qbit"), lock.qbit)
-    : htlcWitnessScript(H, pub(claimParty, "btc"), pub(refundParty, "btc"), lock.btc);
+  const build = (leg, claimParty, refundParty) => chainCfg(leg).script === "p2mr-slhdsa"
+    ? htlcLeafQbit(H, pub(claimParty, leg), pub(refundParty, leg), lock[leg])
+    : htlcWitnessScript(H, pub(claimParty, leg), pub(refundParty, leg), lock[leg]);
   const fromScript = build(fromLeg, "bob", "alice");    // fromLeg: participant claims, initiator refunds
   const toScript = build(toLeg, "alice", "bob");        // toLeg:   initiator claims, participant refunds
-  const pack = (leg, script) => leg === "qbit"
-    ? { leaf: hex(script), spk: hex(p2mrSpk(script)), address: p2mrAddress(script, HRP.qbit) }
-    : { witnessScript: hex(script), spk: hex(p2wshSpk(script)), address: p2wshAddr(script, HRP.btc) };
+  const pack = (leg, script) => chainCfg(leg).script === "p2mr-slhdsa"
+    ? { leaf: hex(script), spk: hex(p2mrSpk(script)), address: p2mrAddress(script, HRP[leg]) }
+    : { witnessScript: hex(script), spk: hex(p2wshSpk(script)), address: p2wshAddr(script, HRP[leg]) };
   s.htlc = { [fromLeg]: pack(fromLeg, fromScript), [toLeg]: pack(toLeg, toScript) };
   s.state = "READY";
   s.readyAt ||= Date.now();   // starts the funding-window countdown
@@ -429,7 +440,11 @@ export async function poll(s) {
   // claim the QBT (revealing the preimage) — leaving the participant's BTC claim spending a UTXO that was
   // replaced away. Once BTC is buried it can't be RBF'd, so the claim always has a live UTXO. Record when
   // that clearance first held: it starts the participant's own funding countdown.
-  const fromBuried = !!from && !from.unconfirmed && (from.confs || 0) >= s.fromConfsTarget.confs;
+  // TRUST-UNCONFIRMED (per-leg config): a 0-conf deposit on a trusted leg counts as buried — the
+  // sequenced-funding clearance, the claimable gate, and broadcast's hold-gate all pass at 0-conf.
+  // This trades the RBF/double-spend safety analysis away for speed; chains.js documents when that's OK.
+  const buriedNow = (leg, f, target) => !!f && (chainCfg(leg).trustUnconfirmed ? true : !f.unconfirmed && (f.confs || 0) >= target);
+  const fromBuried = buriedNow(fromLeg, from, s.fromConfsTarget.confs);
   if (fromBuried) s.fromConfirmedAt ||= Date.now();
   // recompute the pre-claim state from ground truth (broadcast() owns CLAIMED/COMPLETE/REFUNDED)
   if (!["CLAIMED", "CANCELED", ...TERMINAL].includes(s.state)) {
@@ -440,7 +455,7 @@ export async function poll(s) {
       // depth: toLeg protects the buyer against a reorg of the coin they claim; fromLeg protects the
       // seller, whose subsequent claim must spend a funding tx the buyer can no longer RBF/double-spend.
       const fromReady = fromBuried;
-      const toReady = to.confs >= s.confsTarget.confs;
+      const toReady = buriedNow(toLeg, to, s.confsTarget.confs);
       // AND the QBT timelock must still be far enough ahead for the buyer's claim to bury reorg-safe
       // BEFORE the seller's refund unlocks. A slow-confirming (low-fee) deposit can push maturity right up
       // against the timelock; if so we must NOT reveal — the seller could then race a refund and grab both.
@@ -495,7 +510,7 @@ export async function broadcast(s, leg, kind, txHex) {
   // it claims to bury before revealing — so a party who bypasses this check only ever risks its own funds.
   // The seller's fromLeg claim (secret already public) and either refund are never blocked.
   if (kind === "claim" && leg === s.roles.toLeg) {
-    const buried = (f, tgt, l) => f && !f.unconfirmed && (f.confs || 0) >= (tgt?.confs || MIN_CONFS[l]);
+    const buried = (f, tgt, l) => f && (chainCfg(l).trustUnconfirmed || (!f.unconfirmed && (f.confs || 0) >= (tgt?.confs || MIN_CONFS[l])));   // trust-unconfirmed: a 0-conf deposit passes the hold-gate
     if (!buried(s.funding[s.roles.fromLeg], s.fromConfsTarget, s.roles.fromLeg) || !buried(s.funding[leg], s.confsTarget, leg))
       throw new Error("both deposits must confirm to a safe depth before the swap can settle — try again shortly");
     // And refuse to reveal if the QBT timelock is now too close for this claim to bury before the seller's
@@ -503,6 +518,12 @@ export async function broadcast(s, leg, kind, txHex) {
     if ((s.locktimes[leg] - (s.heights?.[leg] || 0)) < s.confsTarget.confs + REVEAL_BUFFER)
       throw new Error("too close to the timelock to reveal safely — this swap will refund instead");
   }
+  // FORK REPLAY PROTECTION: on a replay-protected leg every sweep must carry the >83-byte OP_RETURN
+  // marker (BIP-110 policy refuses to relay/mine it on the fork chain, so this sweep settles on exactly
+  // one side of the pair). ENFORCED, not advisory — a marker-less sweep would replay across the fork
+  // and can hand the counterparty both sides of history. Clients build it (btcSpend `replay: true`).
+  if (chainCfg(leg).replayOpReturn && !hasReplayMarker(parseTx(bin(txHex)).vout))
+    throw new Error(`this ${chainCfg(leg).label} ${kind} lacks the replay-protection OP_RETURN (>83 bytes) — rebuild the sweep with the replay marker`);
   const chain = chainOf(leg);
   const acc = await chain.testAccept(txHex);
   if (!acc.allowed) throw new Error(`rejected: ${acc.reason}`);
@@ -520,6 +541,14 @@ export function submitFinish(s, role, bundle) {
   // path). So require refund.tiers; claim.tiers is optional (and, when present, must be non-empty).
   if (!bundle?.refund?.tiers?.length) throw new Error("finish bundle needs refund.tiers[]");
   if (bundle.claim && !bundle.claim.tiers?.length) throw new Error("finish bundle claim.tiers[] must be non-empty when present");
+  // Replay protection covers the WATCHTOWER path too: these pre-signed txs are broadcast without going
+  // through broadcast()'s check, so validate every tier on a replay-protected leg at upload time.
+  for (const kind of ["claim", "refund"]) {
+    const b = bundle[kind];
+    if (!b?.tiers?.length || !["btc", "qbit"].includes(b.leg) || !chainCfg(b.leg).replayOpReturn) continue;
+    for (const t of b.tiers) if (!hasReplayMarker(parseTx(bin(t.tx)).vout))
+      throw new Error(`${kind} tier lacks the replay-protection OP_RETURN required on the ${chainCfg(b.leg).label} leg — rebuild the watchtower bundle with the replay marker`);
+  }
   s.finish[role] = bundle;
   return touch(s);
 }
@@ -611,6 +640,9 @@ export function view(s, role) {
     : { cleared: true };
   const fundStart = toFunder ? s.fromConfirmedAt : s.readyAt;
   return {
+    // Per-leg chain identity (labels, script family, trust/replay flags) so clients pick the right
+    // keys, signer, and sweep shape without hardcoding what each slot is.
+    chains: publicChains(),
     id: s.id, role, state: s.state, terms: s.terms, direction: s.terms.direction, roles: s.roles,
     H: s.H, locktimes: s.locktimes, htlc: s.htlc, funding: s.funding, heights: s.heights,
     confsTarget: s.confsTarget, fromConfsTarget: s.fromConfsTarget, fee: s.fee || null,

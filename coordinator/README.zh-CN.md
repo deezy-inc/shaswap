@@ -98,6 +98,31 @@ BTC 发送方，充值 `terms + fee`）；卖出则将吃单方的 BTC 所得按
 `RFQ_REP_GRACE_MS`（15 分钟——已具备充值条件但未充值多久后计为未履约）、`RFQ_REP_WINDOW_MS`（1 小时）、
 `RFQ_REP_SUSPEND`（3；设为 0 可禁用）。
 
+## 链对配置（`chains.js`）——第二条腿可配置
+引擎有两个链槽位：`btc` 与第二槽位（线上名称 `qbit`），后者可以是**任何兼容 Bitcoin Core RPC 的
+UTXO 链**。一个环境变量选择预设：
+
+- `CHAIN2=qbit`（默认——行为与此前完全一致）：p2mr/SLH-DSA HTLC、`conftarget-rpc` 重组模型。
+- `CHAIN2=bip110`：**BTC ⇄ BTC/Blake2b 分叉**对（Bitcoin Knots v29.4.x 谱系，BIP-110 已激活）。
+  标准比特币脚本 → **两条腿均为 P2WSH + ECDSA HTLC**，两侧均为 `bc` 地址，`fixed` 重组模型
+  （Blake2b 算力无法按补贴定价；`ALT_FIXED_CONFS`，默认 12），且 **BTC 侧默认开启重放保护**（见下）。
+  将 `QBIT_RPC_URL` 指向分叉节点即可。
+
+所有预设参数均可用环境变量覆盖（`ALT_*`；旧的 `QBIT_*` 仍然有效）。`validateChains()` 在配置错误时
+拒绝启动；公共端点 `GET /chains` 告知客户端每条腿的身份，swap 视图也携带 `chains` 字段。
+
+**重放保护**（`*_REPLAY_OPRETURN`）：分叉双链共享分叉前历史，清扫交易可能在两条链上重放。被标记的
+腿上，每笔清扫必须携带 **载荷超过 83 字节的 OP_RETURN** —— BIP-110（数据载体限制本身）使此类交易
+无法在分叉链上转发/打包，从而将清扫固定在 Core 一侧。协调器在 `broadcast` 与守望塔 `finish` 包上
+**强制执行**；客户端库负责构造（`btcSpend({ replay: true })`）。分叉侧没有对应的标记技巧（分叉链
+本身限制数据载体）：在其可选的 `SIGHASH_UNIFIED` 客户端稳定之前，**请用分叉后（已分离）的币为分叉
+腿充值**，使充值链无法镜像。
+
+**信任未确认**（`BTC_TRUST_UNCONFIRMED` / `ALT_TRUST_UNCONFIRMED`）：将该腿上 0 确认的内存池存款
+视为最终——可认领门、顺序充值门与广播保留门在 0 确认即放行，兑换可在任何确认之前完成清扫。
+**对恶意对手方不安全**（未确认交易可被 RBF/双花）；仅适用于受信任场景——两侧都是你自己的做市方、
+演示环境，或愿以内存池风险换取速度的分叉对。
+
 ## Backends (env, per chain — see `chain.js`)
 每条链通过 `<CHAIN>_BACKEND` 选择一个后端（回退到 `COORD_CHAIN`，再回退到 `dev`）：
 - **`dev`** — 调用某个节点的命令行工具。设置 `<CHAIN>_CLI`，若要远程运行还需设置 `<CHAIN>_SSH_HOST`
