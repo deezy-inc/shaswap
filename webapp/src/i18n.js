@@ -46,6 +46,9 @@ const en = {
   // deposit-time replay warnings (bip110 pair): the SWAP's own settlement txs are replay-protected by
   // the app, but the DEPOSIT comes from the user's wallet — they must protect that send themselves.
   // Only relevant for PRE-FORK coins (shared history); already-split coins need nothing.
+  // fork-pair replay twin (a deposit sent WITHOUT protection was copied to the other chain)
+  twinDetected: "Your {coin} deposit was replayed onto the other chain (it wasn't replay-protected). No action needed — the duplicated coins will be swept back to your refund address automatically once the timelock allows.",
+  twinSwept: "The replayed copy of your {coin} deposit has been returned to your refund address on the other chain.",
   replayWarnTitle: "Replay protection for this deposit",
   replayWarnSplit: "If the coins you're sending are already split (received after the fork, or previously separated), no extra steps are needed — skip this.",
   replayWarnSha: "If your coins predate the fork, a plain BTC-SHA256 transaction can be replayed onto the BTC-Blake2b chain. Have your wallet add an OP_RETURN output carrying more than 83 bytes of data (84 bytes works): BIP-110 nodes refuse to relay such transactions, which pins your deposit to the SHA256 side.",
@@ -332,6 +335,8 @@ const zh = {
   // 分叉对（bip110/shaswap）专用文案——由品牌包选择，而非机械替换的 Qbit 文案
   aboutForkTitle: "什么是 BTC-Blake2b？",
   aboutForkBody: "BTC-Blake2b 是 Bitcoin Knots（BIP-110）链在将工作量证明切换为 BLAKE2b 之后的链：它与比特币共享分叉前的全部历史，此后由 SHA-256 矿机无法触及的硬件继续出块。BTC-SHA256 是原链。shaswap 让您以原子方式在两侧之间兑换——不经交易所、非托管。了解更多请访问",
+  twinDetected: "您的 {coin} 充值已被重放到另一条链上（发送时未加重放保护）。无需任何操作——时间锁允许后，重复的币将自动清扫回您的退款地址。",
+  twinSwept: "您的 {coin} 充值在另一条链上的重放副本已退回您的退款地址。",
   replayWarnTitle: "本次充值的重放保护",
   replayWarnSplit: "如果您发送的币已经分离（分叉后收到，或此前已拆分），则无需任何额外步骤——可跳过本提示。",
   replayWarnSha: "如果您的币早于分叉，普通的 BTC-SHA256 交易可能被重放到 BTC-Blake2b 链上。请让钱包在交易中加入一个携带超过 83 字节数据的 OP_RETURN 输出（84 字节即可）：BIP-110 节点拒绝转发此类交易，从而将您的充值固定在 SHA256 一侧。",

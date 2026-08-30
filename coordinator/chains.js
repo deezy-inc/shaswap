@@ -47,10 +47,15 @@ export const REORG_MODELS = ["btc-subsidy", "conftarget-rpc", "fixed"];
 // A preset names BOTH sides: on a fork pair, plain "BTC" is ambiguous — the pair is displayed as
 // BTC-SHA256 ⇄ BTC-Blake2b so users always know which chain of the fork they're on.
 const CHAIN2_PRESETS = {
-  qbit:   { label: "QBT",         btcLabel: "BTC",        hrp: "qbrt", blockSecs: 60,  minSats: 200000, minConfs: 1, script: "p2mr-slhdsa", reorgModel: "conftarget-rpc", fixedConfs: 6,  btcReplay: false },
-  bip110: { label: "BTC-Blake2b", btcLabel: "BTC-SHA256", hrp: "bc",   blockSecs: 600, minSats: 50000,  minConfs: 1, script: "p2wsh-ecdsa", reorgModel: "fixed",          fixedConfs: 12, btcReplay: true },
+  qbit:   { label: "QBT",         btcLabel: "BTC",        hrp: "qbrt", blockSecs: 60,  minSats: 200000, minConfs: 1, script: "p2mr-slhdsa", reorgModel: "conftarget-rpc", fixedConfs: 6,  btcReplay: false, forkTwin: false },
+  bip110: { label: "BTC-Blake2b", btcLabel: "BTC-SHA256", hrp: "bc",   blockSecs: 600, minSats: 50000,  minConfs: 1, script: "p2wsh-ecdsa", reorgModel: "fixed",          fixedConfs: 12, btcReplay: true,  forkTwin: true },
 };
 export const chain2Preset = () => env("CHAIN2", "qbit");
+// Fork pairs share pre-fork history + tx format, so an UNPROTECTED deposit can be replayed onto the
+// other chain — an identical "twin" UTXO at the same outpoint, paying the same HTLC script. When this
+// flag is on, clients pre-sign a refund-path sweep of that twin (valid on the OTHER chain) and the
+// watchtower returns it to the sender's refund address once the timelock allows (see driveTwinSweep).
+export const forkTwinPair = () => flag("FORK_TWIN", !!CHAIN2_PRESETS[chain2Preset()]?.forkTwin);
 
 export function chainCfg(leg) {
   const p = CHAIN2_PRESETS[chain2Preset()];
@@ -85,7 +90,7 @@ export function chainCfg(leg) {
 // The public projection clients configure themselves from (GET /chains, serve.js injection, view).
 export const publicChains = () => Object.fromEntries(["btc", "qbit"].map((leg) => {
   const { label, hrp, blockSecs, minSats, script, trustUnconfirmed, replayOpReturn } = chainCfg(leg);
-  return [leg, { label, hrp, blockSecs, minSats, script, trustUnconfirmed, replayOpReturn }];
+  return [leg, { label, hrp, blockSecs, minSats, script, trustUnconfirmed, replayOpReturn, forkTwin: forkTwinPair() }];
 }));
 
 // Validate once at startup — catch a typo'd preset/script/model before any swap derives from it.

@@ -1066,6 +1066,11 @@ function renderLive(card, v) {
     card.append(h("div", { class: "note statusline", style: `margin-top:6px;color:${armed ? "var(--good)" : "var(--warn)"}` },
       h("span", {}, armed ? "🛡️" : "⏳"), armed ? t("armedNet") : t("armingNet")));
   }
+  // Fork-pair replay twin: the coordinator spotted a replayed copy of OUR deposit on the other chain
+  // (the send skipped replay protection). No user action — the watchtower sweeps it back automatically.
+  const myTwin = v.twin?.[fundLeg];
+  if (myTwin) card.append(h("p", { class: "note", style: "margin-top:8px;color:var(--warn)" },
+    myTwin.resolved === "swept" ? t("twinSwept", { coin: L(send) }) : t("twinDetected", { coin: L(send) })));
   // Once armed, silently fold the pre-signed recovery ladder into the local vault. No SECOND download is
   // offered: the single backup taken at setup already holds the private keys, and the app regenerates the
   // claim/refund txs from those keys on resume — so one download is all the user ever needs.

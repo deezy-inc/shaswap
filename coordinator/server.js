@@ -2,7 +2,7 @@
 // drive swaps through the same endpoints. Auth is a per-party capability token (X-Swap-Token).
 // Live updates over Server-Sent Events (GET /swaps/:id/events). Basic per-IP rate limiting.
 import http from "node:http";
-import { createSwap, getSwap, roleOf, submitParty, broadcast, view, poll, allSwaps, subscribe, markSeen, addConnection, dropConnection, sweepPresence, submitFinish, driveWatchtower, cancelSwap, evictSettled, recentComplete } from "./swap.js";
+import { createSwap, getSwap, roleOf, submitParty, broadcast, view, poll, allSwaps, subscribe, markSeen, addConnection, dropConnection, sweepPresence, submitFinish, driveWatchtower, driveTwinSweep, cancelSwap, evictSettled, recentComplete } from "./swap.js";
 import { createOffer, getOffer, isMaker, book, takeOffer, cancelOffer, makerView } from "./offers.js";
 import { rfqEnabled, makerByKey, submitQuote, pendingMatches, depth, bestQuote, publicQuote, takeRfq, planFill, publicPlan, takeFill, RFQ_TTL_MS } from "./rfq.js";
 import { validateChains, publicChains } from "./chains.js";
@@ -158,6 +158,7 @@ async function watchTick() {
   for (const s of allSwaps()) {
     try { await poll(s); } catch { /* transient chain error */ }
     try { await driveWatchtower(s); } catch { /* transient */ }
+    try { await driveTwinSweep(s); } catch { /* transient */ }   // fork-pair replay twins (runs on TERMINAL swaps too)
   }
 }
 // Purge settled swaps' descriptors from the BTC watch-only wallet (rpc/pruned-node backend) so it

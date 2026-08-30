@@ -24,7 +24,7 @@ import { qbit, btc } from "./chain.js";
 import { btcFeerates, cachedBtcFeerates, cachedQbitFeerates } from "./fees.js";
 import { feeAddress, validateFeeKey } from "./feeaddr.js";
 import { makeStore } from "./store.js";
-import { chainCfg, publicChains, hasReplayMarker } from "./chains.js";
+import { chainCfg, publicChains, hasReplayMarker, forkTwinPair } from "./chains.js";
 
 export const States = ["CREATED", "READY", "FROM_FUNDED", "TO_FUNDED", "MATURING", "CLAIMABLE", "CLAIMED", "COMPLETE", "REFUNDED", "ABORTED"];
 const TERMINAL = ["COMPLETE", "REFUNDED", "ABORTED"];
@@ -55,7 +55,7 @@ export function evictSettled() {
   const cutoff = Date.now() - EVICT_MS;
   let n = 0;
   for (const s of swaps.values())
-    if (TERMINAL.includes(s.state) && s.settledAt > 0 && s.settledAt < cutoff) { swaps.delete(s.id); n++; }
+    if (TERMINAL.includes(s.state) && s.settledAt > 0 && s.settledAt < cutoff && !twinPending(s)) { swaps.delete(s.id); n++; }   // a detected-but-unswept replay twin pins the swap in memory (driveTwinSweep needs it)
   return n;
 }
 // Store-backed aggregates over ALL swaps (incl. evicted) — null when the backend can't provide them
@@ -86,7 +86,7 @@ export function subscribe(id, cb) {
 // Global subscription: fires on ANY swap's change. Drives the admin dashboard's live feed.
 const allSubs = new Set();
 export function subscribeAll(cb) { allSubs.add(cb); return () => allSubs.delete(cb); }
-const sigOf = (s) => JSON.stringify({ st: s.state, f: s.funding, r: s.refund, p: s.preimage, b: s.broadcasts, fn: [!!s.finish?.alice, !!s.finish?.bob] });
+const sigOf = (s) => JSON.stringify({ st: s.state, f: s.funding, r: s.refund, p: s.preimage, b: s.broadcasts, fn: [!!s.finish?.alice, !!s.finish?.bob], tw: s.twin });
 function emit(s) {
   for (const cb of subs.get(s.id) || []) { try { cb(s); } catch { /* dead listener */ } }
   for (const cb of allSubs) { try { cb(s); } catch { /* dead listener */ } }
@@ -541,9 +541,19 @@ export function submitFinish(s, role, bundle) {
   // path). So require refund.tiers; claim.tiers is optional (and, when present, must be non-empty).
   if (!bundle?.refund?.tiers?.length) throw new Error("finish bundle needs refund.tiers[]");
   if (bundle.claim && !bundle.claim.tiers?.length) throw new Error("finish bundle claim.tiers[] must be non-empty when present");
+  // Twin sweep (fork pairs only): a refund-path spend of this party's deposit outpoint, pre-signed for
+  // the OTHER chain — used by driveTwinSweep if the deposit gets replayed across the fork. `leg` is the
+  // chain it will be broadcast ON; `fundLeg` is the leg whose deposit it reclaims.
+  if (bundle.twin) {
+    if (!forkTwinPair()) throw new Error("twin sweep only applies to a fork pair");
+    if (!bundle.twin.tiers?.length || !["btc", "qbit"].includes(bundle.twin.leg) || !["btc", "qbit"].includes(bundle.twin.fundLeg) || bundle.twin.leg === bundle.twin.fundLeg)
+      throw new Error("twin bundle needs tiers[] and opposite leg/fundLeg");
+  }
   // Replay protection covers the WATCHTOWER path too: these pre-signed txs are broadcast without going
   // through broadcast()'s check, so validate every tier on a replay-protected leg at upload time.
-  for (const kind of ["claim", "refund"]) {
+  // (For `twin`, b.leg is the broadcast chain, so the marker requirement lands exactly where it must:
+  // a twin sweep broadcast on the marker leg carries the marker; one for the fork leg must not.)
+  for (const kind of ["claim", "refund", "twin"]) {
     const b = bundle[kind];
     if (!b?.tiers?.length || !["btc", "qbit"].includes(b.leg) || !chainCfg(b.leg).replayOpReturn) continue;
     for (const t of b.tiers) if (!hasReplayMarker(parseTx(bin(t.tx)).vout))
@@ -627,6 +637,63 @@ export async function driveWatchtower(s) {
   touch(s);
 }
 
+// ── fork-pair twin sweep ──────────────────────────────────────────────────────
+// If a sender skips replay protection, their deposit tx can be replayed onto the OTHER chain of the
+// fork — an identical "twin" UTXO at the same outpoint, paying the same HTLC script. The refund path
+// still belongs to the sender, so once the timelock allows, the watchtower returns the twin to their
+// refund address using the `twin` tiers the client pre-signed for that chain (see submitFinish).
+//
+// Broadcast ONLY after the real deposit's outpoint is spent on its home chain (the swap settled) plus
+// a delay: the fork-leg twin sweep carries no marker (BIP-110 forbids large datacarriers there), so a
+// third party COULD replay it back onto the home chain — where it is then a double-spend of an
+// already-settled outpoint, i.e. harmless. The btc-leg twin sweep carries the marker and can't travel.
+// Runs for TERMINAL swaps too (the twin chain may lag the CLTV height by weeks); eviction is held off
+// while a detected twin is unresolved (see evictSettled). A twin that appears only after the swap
+// evicted is out of scope here — the pre-signed sweep remains in the party's backup file.
+const TWIN_CHECK_MS = () => Number(process.env.TWIN_CHECK_MS || 60000);       // per-swap probe throttle
+const TWIN_SWEEP_DELAY_MS = () => Number(process.env.TWIN_SWEEP_DELAY_MS || 3600000);   // ≈6 BTC blocks past home settle
+export const twinPending = (s) => !!s.twin && Object.values(s.twin).some((t) => !t.resolved);
+export async function driveTwinSweep(s) {
+  if (!forkTwinPair() || !s.htlc || !s.locktimes || ["CREATED", "CANCELED"].includes(s.state)) return;
+  const now = Date.now();
+  if (s._twinAt && now - s._twinAt < TWIN_CHECK_MS()) return;
+  s._twinAt = now;
+  for (const role of ["alice", "bob"]) {
+    const tw = s.finish?.[role]?.twin;
+    if (!tw?.tiers?.length) continue;
+    const key = `${role}:twin`;
+    if ((s.wt ||= {})[key]?.done) continue;
+    const f = s.funding[tw.fundLeg] || s.shortFunded?.[tw.fundLeg];
+    if (!f) continue;
+    const twinChain = chainOf(tw.leg), home = chainOf(tw.fundLeg);
+    let t = s.twin?.[tw.fundLeg];
+    // 1) detect: the deposit's outpoint exists unspent on the OTHER chain → it was replayed.
+    if (!t) {
+      if (!(await twinChain.isUnspent(f.txid, f.vout))) continue;
+      t = ((s.twin ||= {})[tw.fundLeg] = { detectedAt: now });
+      console.log(`[twin] swap ${s.id}: ${chainCfg(tw.fundLeg).label} deposit ${f.txid.slice(0, 16)}… replayed onto ${chainCfg(tw.leg).label} — sweeping back after the timelock`);
+      touch(s);
+    }
+    // 2) the REAL deposit must be spent on its home chain, settled past a reorg-safe delay.
+    if (await home.isUnspent(f.txid, f.vout)) continue;
+    if (!t.homeSpentAt) { t.homeSpentAt = now; touch(s); }
+    if (now - t.homeSpentAt < TWIN_SWEEP_DELAY_MS()) continue;
+    // 3) the pre-signed sweep's nLockTime is the HTLC's CLTV height — final only once the TWIN chain
+    //    reaches it (a lagging fork chain gets there later; the sweep just waits).
+    if ((await twinChain.height()) < s.locktimes[tw.fundLeg]) continue;
+    // 4) still unswept? (the owner may have reclaimed it themselves out-of-band)
+    if (!(await twinChain.isUnspent(f.txid, f.vout))) { s.wt[key] = { done: true, ts: now }; t.resolved = "external"; touch(s); continue; }
+    const tier = await pickTier(tw.leg, tw.tiers, s.wt[key]?.tier || 0);
+    const acc = await twinChain.testAccept(tw.tiers[tier].tx);
+    if (!acc.allowed) continue;                     // non-final / fee too low right now — retry next probe
+    const txid = await twinChain.broadcast(tw.tiers[tier].tx);
+    s.wt[key] = { txid, tier, ts: now, done: true };
+    t.sweepTxid = txid; t.resolved = "swept";
+    console.log(`[twin] swap ${s.id}: replayed ${chainCfg(tw.fundLeg).label} deposit swept back to its sender on ${chainCfg(tw.leg).label} (${txid.slice(0, 16)}…)`);
+    touch(s);
+  }
+}
+
 // The view a party is allowed to see (both legs' public data; preimage only once on-chain).
 export function view(s, role) {
   // Sequenced funding: the participant (bob) funds the toLeg (QBT) leg and may only do so once the
@@ -654,6 +721,7 @@ export function view(s, role) {
     counterpartyOnline: isOnline(s, role === "alice" ? "bob" : "alice"), selfOnline: isOnline(s, role),
     safetyNet: { self: !!s.finish?.[role], counterparty: !!s.finish?.[role === "alice" ? "bob" : "alice"] },
     shortFunded: s.shortFunded || null,
+    twin: s.twin || null,   // fork-pair replay twins: { [fundLeg]: { detectedAt, homeSpentAt?, sweepTxid?, resolved? } }
     preimage: s.preimage, broadcasts: s.broadcasts,
     canceled: s.canceled ? { byYou: s.canceled.by === role, at: s.canceled.at } : null,
   };

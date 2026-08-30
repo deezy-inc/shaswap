@@ -51,6 +51,13 @@ export class MockChain {
     return txid;
   }
   async spendingTxid(txid, vout) { return this.spentBy.get(`${txid}:${vout}`) || null; }
+  // Fork-pair replay: copy `txid`'s outputs from the other chain onto this one — the same outpoints
+  // now exist on both chains, exactly what a replayed (unprotected) deposit produces.
+  mirrorFrom(src, txid) {
+    for (const [k, u] of src.utxo) if (u.txid === txid) this.utxo.set(k, { ...u, height: this.height, spent: false });
+    const t = src.tx.get(txid); if (t) this.tx.set(txid, t);
+    return this;
+  }
   async getTx(txid) {
     const t = this.tx.get(txid);
     if (!t) throw new Error(`mockchain: unknown tx ${txid}`);

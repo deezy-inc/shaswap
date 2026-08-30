@@ -265,6 +265,20 @@ export class SwapClient {
           refund: { leg: refund, tiers: await ladderOf(refund, "refund", new Uint8Array(0), 0) },   // no coordinator-fee output on a refund
         }
       : { refund: { leg: refund, tiers: await ladderOf(refund, "refund", new Uint8Array(0), 0) } };   // underfunded → refund only (no claim path)
+    // Fork pairs: pre-sign a TWIN sweep — the same refund-path spend of our deposit outpoint, but
+    // built for the OTHER chain. If our deposit gets replayed across the fork (sender skipped the
+    // replay protection), the watchtower uses this to return the duplicated coins to our refund
+    // address once the timelock allows. The replay marker rides it only when the chain it will be
+    // broadcast ON requires one (btc leg: marker keeps THIS sweep from crossing back; fork leg:
+    // BIP-110 would refuse to relay a marker-ed tx at all).
+    const twinLeg = fund === "btc" ? "qbit" : "btc";
+    if ((v.chains || this.view?.chains || this.chains)?.[fund]?.forkTwin && this.famOf(fund) === "p2wsh-ecdsa") {
+      const amt = (v.funding?.[fund] || v.shortFunded?.[fund]).amountSats;
+      const xvb = this.replayOf(twinLeg) ? REPLAY_VB : 0;
+      const aff = LADDER[twinLeg].map((fr) => ({ fr, fee: feeFor(fund, "refund", fr, v.feerates, xvb) })).filter(({ fee }) => amt - fee > DUST);
+      const use = aff.length ? aff : [{ fr: LADDER[twinLeg][0], fee: feeFor(fund, "refund", LADDER[twinLeg][0], v.feerates, xvb) }];
+      bundle.twin = { leg: twinLeg, fundLeg: fund, tiers: await Promise.all(use.map(async ({ fr, fee }) => ({ feerate: fr, tx: hex(await this.#buildTwin(v, fund, twinLeg, fee)) }))) };
+    }
     // Keep our own copy of the pre-signed recovery ladder BEFORE the POST — the file alone (keys + these
     // txs) is enough to recover even if the coordinator is gone, AND the coordinator emits the "armed"
     // view update the instant it receives the bundle (over SSE, before this POST's own response
@@ -300,6 +314,13 @@ export class SwapClient {
     const leg = kind === "refund" ? refund : claim;
     const preimage = kind === "refund" ? new Uint8Array(0) : (this.role === "alice" ? this.secret : bin(v.preimage));
     return { leg, hex: hex(await this.#build(v, leg, kind, preimage, this.#liveFee(v, leg, kind))) };
+  }
+
+  // Twin sweep: refund-branch spend of our FUND-leg deposit outpoint, destined for the OTHER chain of
+  // a fork pair (same script rules, so the same ECDSA signing applies — only the marker differs).
+  async #buildTwin(v, fundLeg, twinLeg, feeSats) {
+    const f = v.funding[fundLeg] || v.shortFunded?.[fundLeg], ws = bin(v.htlc[fundLeg].witnessScript), destSpk = addressToScriptPubKey(this.#destOf(fundLeg));
+    return btcSpend({ prevTxidLE: bin(f.txid).reverse(), vout: f.vout, amount: f.amountSats, ws, priv: this.#privOf(fundLeg), destSpk, outVal: f.amountSats - feeSats, branch: "refund", preimage: new Uint8Array(0), locktime: v.locktimes[fundLeg], extraOut: null, replay: this.replayOf(twinLeg) });
   }
 
   async #buildP2mr(v, leg, kind, preimage, feeSats) {
