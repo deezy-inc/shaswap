@@ -10,6 +10,8 @@
 const fmt = (sats) => (sats / 1e8).toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
 
 export function startTelegram({ bot, wallet, quote, sanity = null, usd = null, token, chatId, log = console.log, apiBase = "https://api.telegram.org" }) {
+  const LBL = { btc: bot?.chains?.btc?.label || "BTC", qbt: bot?.chains?.qbit?.label || "QBT" };   // pair tickers (CHAIN2-aware: BTC-SHA256 / BTC-Blake2b on a fork pair)
+  const PAIR = `${LBL.btc}/${LBL.qbt}`;
   const api = async (method, body) => {
     const r = await fetch(`${apiBase}/bot${token}/${method}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const j = await r.json().catch(() => ({}));
@@ -22,15 +24,15 @@ export function startTelegram({ bot, wallet, quote, sanity = null, usd = null, t
   const sideWord = (m) => (m.side === "ask" ? "sold" : "bought");
   bot.onEvent = (type, d) => {
     const id = `<code>${(d.swapId || "").slice(0, 10)}</code>`;
-    if (type === "match") send(`🤝 Matched ${id}: retail ${d.side === "ask" ? "buys" : "sells"} ${fmt(d.qbtSats)} QBT @ ${d.price} — fulfilling as ${d.role}`);
-    else if (type === "funded") send(`💰 Funded ${d.leg.toUpperCase()} leg of ${id} (${fmt(d.sats)} ${d.leg === "btc" ? "BTC" : "QBT"})`);
-    else if (type === "completed") send(`✅ Swap ${id} COMPLETE — ${sideWord(d)} ${fmt(d.qbtSats)} QBT @ ${d.price}`);
+    if (type === "match") send(`🤝 Matched ${id}: retail ${d.side === "ask" ? "buys" : "sells"} ${fmt(d.qbtSats)} ${LBL.qbt} @ ${d.price} — fulfilling as ${d.role}`);
+    else if (type === "funded") send(`💰 Funded ${d.leg.toUpperCase()} leg of ${id} (${fmt(d.sats)} ${d.leg === "btc" ? LBL.btc : LBL.qbt})`);
+    else if (type === "completed") send(`✅ Swap ${id} COMPLETE — ${sideWord(d)} ${fmt(d.qbtSats)} ${LBL.qbt} @ ${d.price}`);
     else if (type === "refunded") send(`↩️ Swap ${id} refunded — taker walked; funds recovered`);
     else if (type === "error") send(`⚠️ Swap ${id} error: ${d.error}`);
   };
 
   // ── commands ───────────────────────────────────────────────────────────────────────────────────
-  const sideLine = (s) => (s ? `${s.price} × ${fmt(s.qbtSats)} QBT` : "—");
+  const sideLine = (s) => (s ? `${s.price} × ${fmt(s.qbtSats)} ${LBL.qbt}` : "—");
   const quoteText = () => `Quote${quote.paused ? " (PAUSED)" : ""}:\n  bid ${sideLine(quote.bid)}\n  ask ${sideLine(quote.ask)}`;
   // "/bid 0.0000011" — fixed price in BTC per QBT. "/bid $0.12" — a USD PEG: converted via live BTCUSD
   // and re-priced so the dollar price follows BTC. Either form is checked against the market reference
@@ -40,7 +42,7 @@ export function startTelegram({ bot, wallet, quote, sanity = null, usd = null, t
     const isUsd = raw.startsWith("$");
     if (isUsd && !usd) return "USD quoting isn't wired up in this runner";
     const n = Number(isUsd ? raw.slice(1) : raw);
-    if (!(n > 0)) return `usage: /${side} &lt;price BTC/QBT&gt; or /${side} $&lt;price USD/QBT&gt; (or /${side} off)`;
+    if (!(n > 0)) return `usage: /${side} &lt;price ${PAIR}&gt; or /${side} $&lt;price USD/QBT&gt; (or /${side} off)`;
     let p;
     try { p = isUsd ? await usd.toBtc(n) : n; } catch (e) { return `⚠️ ${e.message}`; }
     if (sanity && !flags.includes("force")) {
@@ -50,11 +52,11 @@ export function startTelegram({ bot, wallet, quote, sanity = null, usd = null, t
     const size = quote[side]?.qbtSats ?? quote[side === "bid" ? "ask" : "bid"]?.qbtSats ?? 50e8;
     quote[side] = { price: p, qbtSats: size };
     usd?.peg(side, isUsd ? n : null);            // $ form pegs the side to USD (repricer follows BTC); plain form un-pegs it
-    return `ok — ${side} → ${isUsd ? `$${n} (peg, currently ${p.toFixed(10)} BTC/QBT)` : p}\n\n${quoteText()}`;
+    return `ok — ${side} → ${isUsd ? `$${n} (peg, currently ${p.toFixed(10)} ${PAIR})` : p}\n\n${quoteText()}`;
   };
   const handlers = {
     help: () => "Commands:\n/balances — spendable BTC + QBT\n/quote — current bid/ask/size\n/bid &lt;p&gt; · /ask &lt;p&gt; — set a BTC/QBT price ($&lt;p&gt; = USD peg that follows BTC; 'off' drops the side; append 'force' to override the sanity check)\n/size &lt;qbt&gt; — set per-side size\n/pause · /resume — stop/restart quoting\n/status — in-flight swaps",
-    balances: async () => { const b = await wallet.balances(); return `Spendable (incl. safe unconfirmed):\n  ${fmt(b.btcSats)} BTC\n  ${fmt(b.qbtSats)} QBT`; },
+    balances: async () => { const b = await wallet.balances(); return `Spendable (incl. safe unconfirmed):\n  ${fmt(b.btcSats)} ${LBL.btc}\n  ${fmt(b.qbtSats)} ${LBL.qbt}`; },
     quote: () => quoteText(),
     bid: (arg) => (String(arg).trim() === "off" ? ((quote.bid = null), usd?.peg("bid", null), `ok — bid off\n\n${quoteText()}`) : setSide("bid", arg)),
     ask: (arg) => (String(arg).trim() === "off" ? ((quote.ask = null), usd?.peg("ask", null), `ok — ask off\n\n${quoteText()}`) : setSide("ask", arg)),

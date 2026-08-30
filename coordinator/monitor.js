@@ -35,7 +35,8 @@ const DISK_HOSTS = (process.env.DISK_HOSTS || "swap-server:,swap-node:qbit-swap-
 const now = Date.now();
 
 const short = (id) => (id || "").slice(0, 10);
-const fmtAmt = (s) => `${(s.btcSats || 0) / 1e8} BTC ⇄ ${(s.qbtSats || 0) / 1e8} QBT`;
+let LBL = { btc: "BTC", qbit: "QBT" };   // pair display tickers — refreshed from the overview each run (CHAIN2-aware)
+const fmtAmt = (s) => `${(s.btcSats || 0) / 1e8} ${LBL.btc} ⇄ ${(s.qbtSats || 0) / 1e8} ${LBL.qbit}`;
 const mins = (ms) => Math.round(ms / 60000);
 const stEmoji = (st) => ({ CREATED: "🆕", READY: "🤝", FROM_FUNDED: "💰", TO_FUNDED: "💰", MATURING: "⏳", CLAIMABLE: "🔓", CLAIMED: "🔑", COMPLETE: "✅", REFUNDED: "↩️", CANCELED: "🚫", ABORTED: "⚠️" }[st] || "🔄");
 // Percent-used of the root filesystem on `host` (null = local): parse `df -P /`'s Capacity column. For a
@@ -91,6 +92,7 @@ async function main() {
     saveState(state); return;
   }
   if (state.alerts["admin-unreachable"]) { await tg("✅ Coordinator admin API reachable again"); delete state.alerts["admin-unreachable"]; }
+  if (ov.labels) LBL = ov.labels;
 
   // Node connectivity (both legs) + chain-height stall (QBT only). Bitcoin routinely goes >20 min
   // between blocks — that's expected variance, not a fault — so a height-stall alert on BTC is pure

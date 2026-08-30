@@ -8,6 +8,7 @@ import { randomBytes } from "node:crypto";
 import { allSwaps, getSwap, isOnline, subscribeAll, storeBackend, persistedCounts, persistedVolume, swapsIncludingSettled } from "./swap.js";
 import { allOffers } from "./offers.js";
 import { rfqStatus } from "./rfq.js";
+import { publicChains } from "./chains.js";
 import { qbit, btc } from "./chain.js";
 
 const TERMINAL = ["COMPLETE", "REFUNDED", "ABORTED"];
@@ -112,6 +113,7 @@ async function overview() {
   const [b, q] = await Promise.all([chainInfo(btc), chainInfo(qbit)]);
   return {
     now: Date.now(), network: process.env.NETWORK || "regtest", persistence: storeBackend(),
+    labels: { btc: publicChains().btc.label, qbit: publicChains().qbit.label },   // pair display tickers (CHAIN2-aware)
     chains: { btc: b, qbit: q },
     counts,
     totals: {

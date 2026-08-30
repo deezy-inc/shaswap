@@ -57,7 +57,7 @@ async function main() {
 
   // ── sanity: the pair config the clients see ────────────────────────────────────────────────────
   const chains = await api("/chains");
-  ck(chains.qbit.script === "p2wsh-ecdsa" && chains.qbit.label === "B110", "GET /chains: second slot is the P2WSH+ECDSA fork");
+  ck(chains.qbit.script === "p2wsh-ecdsa" && chains.qbit.label === "BTC-Blake2b" && chains.btc.label === "BTC-SHA256", "GET /chains: pair labeled BTC-SHA256 ⇄ BTC-Blake2b");
   ck(chains.btc.replayOpReturn === true && chains.qbit.replayOpReturn === false, "replay protection: ON for the BTC side, off on the fork side");
 
   // ── 1) full fork-pair swap → COMPLETE, with replay markers on every BTC-side sweep ─────────────

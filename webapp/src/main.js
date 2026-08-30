@@ -4,7 +4,7 @@
 // UI strings are translated via i18n (English / 简体中文) with a header switcher.
 import { SwapClient, dynFee } from "./swapflow.js";
 import { exportBackup, importBackup, Vault } from "./keystore.js";
-import { t, getLang, setLang, LANGS } from "./i18n.js";
+import { t, getLang, setLang, LANGS, tickers } from "./i18n.js";
 import { addressToScriptPubKey, addressCoin } from "@qbit-swap/client";
 
 // Expected network per coin (bech32 hrp). Regtest by default; a mainnet deploy injects
@@ -58,6 +58,9 @@ window.addEventListener("beforeunload", (e) => { if (liveGuard.risky) { e.preven
 // Every swap is btc2qbt under the hood (initiator=alice=QBT buyer, sends BTC). A party's personal
 // orientation is just a view of their role: alice sends BTC / sells nothing (buys QBT); bob sends QBT.
 const DIR = { btc2qbt: { from: "BTC", to: "QBT" }, qbt2btc: { from: "QBT", to: "BTC" } };
+// Display label for an internal coin symbol — configured pair tickers (e.g. BTC-SHA256/BTC-Blake2b
+// under CHAIN2=bip110). Strings built via t() are relabeled inside i18n; use L() for raw templates.
+const L = (coin) => (coin === "BTC" ? tickers().btc : coin === "QBT" ? tickers().qbt : coin);
 const dirForRole = (role) => (role === "bob" ? "qbt2btc" : "btc2qbt");
 const coinLeg = (coin) => (coin === "BTC" ? "btc" : "qbit");
 const sats = (n) => (n / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 });   // DISPLAY only (grouped) — never write this into an <input>: its thousands comma breaks parseFloat on re-read
@@ -95,7 +98,7 @@ function netReceive(recv, feerates, feeOn = false) {
   const fee = Math.min(dynFee(coinLeg(recv), "claim", feerates), Math.max(0, gross - DUST_UI));
   return { gross, fee, net: gross - fee };
 }
-const feeStr = (coin, fee) => (coin === "BTC" ? `${fee.toLocaleString()} sat` : `${sats(fee)} QBT`);
+const feeStr = (coin, fee) => (coin === "BTC" ? `${fee.toLocaleString()} sat` : `${sats(fee)} ${tickers().qbt}`);
 // A one-line breakdown shown to the BTC sender (buyer) when a platform fee applies: swap + fee = total.
 function feeBreakdown(v) {
   const { send } = roleCoins(), fee = v?.fee ?? flow.client?.view?.fee ?? flow.fee, f = feeSats(v);
@@ -297,7 +300,7 @@ function buildInst(box) {
 
   const panel = (labelKey, input, coin, feeNote) => h("div", { class: "inst-panel" },
     h("div", { class: "inst-label" }, t(labelKey)),
-    h("div", { class: "inst-row" }, input, h("span", { class: "inst-coin" }, coin)),
+    h("div", { class: "inst-row" }, input, h("span", { class: "inst-coin" }, L(coin))),
     feeNote ? h("div", { class: "inst-fee" }, feeNote) : null);
   const payFee = (payCoin() === "BTC" && FEE_BPS > 0) ? t("instFeeNote", { pct: feePct() }) : null;
   // Taker-pays on sells too: the quoted BTC proceeds arrive NET of the platform fee — say so.
@@ -481,13 +484,13 @@ async function stepTrades() {
   } else {
     const usdCell = (tr) => (btcUsd ? `$${trimZeros((tr.price * btcUsd).toFixed(4))}` : "—");   // USD per QBT = (BTC/QBT) × BTCUSD
     const rows = trades.map((tr) => h("tr", {},
-      h("td", {}, `${sats(tr.qbtSats)} QBT`),
-      h("td", {}, `${sats(tr.btcSats)} BTC`),
+      h("td", {}, `${sats(tr.qbtSats)} ${tickers().qbt}`),
+      h("td", {}, `${sats(tr.btcSats)} ${tickers().btc}`),
       h("td", {}, trimZeros(tr.price.toFixed(8))),
       h("td", {}, usdCell(tr)),
       h("td", { class: "when" }, tr.settledAt ? ago(tr.settledAt) : "—")));
     content = h("div", { class: "trades-card" }, h("table", { class: "trades" },
-      h("thead", {}, h("tr", {}, h("th", {}, "QBT"), h("th", {}, "BTC"), h("th", {}, t("tradesPriceBtc")), h("th", {}, t("tradesPriceUsd")), h("th", {}, t("tradesWhen")))),
+      h("thead", {}, h("tr", {}, h("th", {}, tickers().qbt), h("th", {}, tickers().btc), h("th", {}, t("tradesPriceBtc")), h("th", {}, t("tradesPriceUsd")), h("th", {}, t("tradesWhen")))),
       h("tbody", {}, ...rows)));
   }
   render(h("div", { class: "page" },
@@ -536,8 +539,8 @@ function scheduleMarketRefresh(direction, action) {
 function offerRow(o, action) {
   const btn = h("button", { class: "primary", style: "padding:6px 16px", onclick: () => takeAndStart(o, action) }, action === "buy" ? t("buyBtn") : t("sellBtn"));
   return h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 0;border-top:1px solid var(--line)" },
-    h("div", {}, h("span", { style: "font-weight:600" }, `${sats(o.qbtSats)} QBT`), h("span", { class: "note", style: "margin-left:10px" }, `${o.price.toFixed(4)} ${t("perQbt")}`)),
-    h("div", { style: "display:flex;align-items:center;gap:14px" }, h("span", { class: "note" }, `${sats(o.btcSats)} BTC`), btn));
+    h("div", {}, h("span", { style: "font-weight:600" }, `${sats(o.qbtSats)} ${tickers().qbt}`), h("span", { class: "note", style: "margin-left:10px" }, `${o.price.toFixed(4)} ${t("perQbt")}`)),
+    h("div", { style: "display:flex;align-items:center;gap:14px" }, h("span", { class: "note" }, `${sats(o.btcSats)} ${tickers().btc}`), btn));
 }
 async function takeAndStart(o, action) {
   try {
@@ -854,9 +857,9 @@ function stepInvited() {
     title: t("invitedTitle"), subtitle: t("invitedSub"),
     body: [
       h("div", { class: "fund" },
-        h("div", {}, `${t("youSend")}  `, h("b", {}, `${sats(sendSats())} ${send}`)),
+        h("div", {}, `${t("youSend")}  `, h("b", {}, `${sats(sendSats())} ${L(send)}`)),
         feeBreakdown(),
-        h("div", { style: "margin-top:4px" }, `${t("youReceive")}  `, h("b", {}, `${sats(nr.net)} ${recv}`),
+        h("div", { style: "margin-top:4px" }, `${t("youReceive")}  `, h("b", {}, `${sats(nr.net)} ${L(recv)}`),
           nr.fee > 0 ? h("span", { class: "note", style: "margin-left:6px" }, t("afterFeeShort", { fee: feeStr(recv, nr.fee) })) : null)),
       h("p", { class: "note" }, t("invitedNote")),
     ],
@@ -1020,7 +1023,7 @@ function renderLive(card, v) {
   // While waiting for the counterparty, show the deal prominently.
   if (!terminal && !addr) {
     card.append(h("div", { style: "font-size:19px;font-weight:640;letter-spacing:-.01em;margin-top:14px;line-height:1.4" },
-      t("sendingReceiving", { outAmt: `${sats(sendSats(v))} ${send}`, inAmt: `${sats(coinSats(recv))} ${recv}` }),
+      t("sendingReceiving", { outAmt: `${sats(sendSats(v))} ${L(send)}`, inAmt: `${sats(coinSats(recv))} ${L(recv)}` }),
       " ",
       h("span", { class: "note", style: "font-weight:400;font-size:13px" }, t("minusFees"))));
     const fb = feeBreakdown(v); if (fb) card.append(fb);
@@ -1090,7 +1093,7 @@ function renderLive(card, v) {
     action = h("div", { class: "fund" },
       h("div", { class: "muted" }, funded ? t(funded.unconfirmed ? "coinPendingCheck" : "coinLockedCheck", { coin: send }) : t("sendExactly", { coin: send })),
       h("div", { style: "display:flex;align-items:center;gap:12px;flex-wrap:wrap" },
-        h("div", { class: "amt" }, `${sats(sendSats(v))} ${send}`),
+        h("div", { class: "amt" }, `${sats(sendSats(v))} ${L(send)}`),
         funded ? null : copyButton("copyAmount", "copiedCheck", () => amtStr(sendSats(v)))),   // copy button sits right next to the amount (not pushed to the far edge)
       feeBreakdown(v),
       // Deposit fee-rate guidance: the swap can't progress until this deposit confirms, so nudge the

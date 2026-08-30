@@ -25,7 +25,8 @@ ck(chainCfg("qbit").hrp === "tb", "ALT_* wins over legacy QBIT_* when both are s
 clean();
 process.env.CHAIN2 = "bip110";
 q = chainCfg("qbit"); b = chainCfg("btc");
-ck(q.label === "B110" && q.script === "p2wsh-ecdsa" && q.hrp === "bc" && q.blockSecs === 600, "CHAIN2=bip110 → P2WSH+ECDSA second leg, bc addresses, 600s blocks");
+ck(q.label === "BTC-Blake2b" && q.script === "p2wsh-ecdsa" && q.hrp === "bc" && q.blockSecs === 600, "CHAIN2=bip110 → P2WSH+ECDSA second leg, bc addresses, 600s blocks");
+ck(b.label === "BTC-SHA256", "under bip110 the BTC side is labeled BTC-SHA256 (fork disambiguation)");
 ck(q.reorgModel === "fixed" && q.fixedConfs === 12, "bip110 uses the fixed-confs reorg model (Blake2b hashrate can't be subsidy-priced)");
 ck(b.replayOpReturn === true, "bip110 preset turns ON BTC-side replay protection by default");
 ck(q.replayOpReturn === false, "fork side has no marker trick (BIP-110 IS the datacarrier limit) — off by default");

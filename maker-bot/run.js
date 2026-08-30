@@ -147,6 +147,7 @@ const sanity = async (side, price) => {
   return { ok: false, msg: `${describe(o)}${r ? ` (reference ${r.price.toFixed(10)} — ${r.source})` : ""}.${o.losing ? " That side LOSES money as quoted." : ""}\nAppend "force" to override.` };
 };
 const usd = { toBtc: async (u) => usdToBtcQbt(u, await btcUsd()), peg: (side, u) => { pegs[side] = u; } };
+bot.chains = await fetch(`${coordinatorUrl.replace(/\/$/, "")}/chains`).then((r) => r.json()).catch(() => null);   // pair labels for logs + Telegram (BTC-SHA256/BTC-Blake2b on a fork pair)
 if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID)
   startTelegram({ bot, wallet, quote, sanity, usd, token: process.env.TELEGRAM_BOT_TOKEN, chatId: process.env.TELEGRAM_CHAT_ID });
 

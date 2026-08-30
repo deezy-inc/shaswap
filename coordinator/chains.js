@@ -44,9 +44,11 @@ export const REORG_MODELS = ["btc-subsidy", "conftarget-rpc", "fixed"];
 // Presets for the second slot. `bip110` is a POLICY/PoW fork of Bitcoin (Blake2b PoW, 164-byte v2
 // headers — both invisible at the RPC/tx layer we use): tx format, script rules, and ECDSA sighash are
 // stock Bitcoin, so the standard P2WSH HTLC family applies as-is.
+// A preset names BOTH sides: on a fork pair, plain "BTC" is ambiguous — the pair is displayed as
+// BTC-SHA256 ⇄ BTC-Blake2b so users always know which chain of the fork they're on.
 const CHAIN2_PRESETS = {
-  qbit:   { label: "QBT",  hrp: "qbrt", blockSecs: 60,  minSats: 200000, minConfs: 1, script: "p2mr-slhdsa", reorgModel: "conftarget-rpc", fixedConfs: 6,  btcReplay: false },
-  bip110: { label: "B110", hrp: "bc",   blockSecs: 600, minSats: 50000,  minConfs: 1, script: "p2wsh-ecdsa", reorgModel: "fixed",          fixedConfs: 12, btcReplay: true },
+  qbit:   { label: "QBT",         btcLabel: "BTC",        hrp: "qbrt", blockSecs: 60,  minSats: 200000, minConfs: 1, script: "p2mr-slhdsa", reorgModel: "conftarget-rpc", fixedConfs: 6,  btcReplay: false },
+  bip110: { label: "BTC-Blake2b", btcLabel: "BTC-SHA256", hrp: "bc",   blockSecs: 600, minSats: 50000,  minConfs: 1, script: "p2wsh-ecdsa", reorgModel: "fixed",          fixedConfs: 12, btcReplay: true },
 };
 export const chain2Preset = () => env("CHAIN2", "qbit");
 
@@ -54,7 +56,7 @@ export function chainCfg(leg) {
   const p = CHAIN2_PRESETS[chain2Preset()];
   if (!p) throw new Error(`CHAIN2="${chain2Preset()}" — unknown preset (${Object.keys(CHAIN2_PRESETS).join("|")})`);
   if (leg === "btc") return {
-    label: env("BTC_LABEL", "BTC"),
+    label: env("BTC_LABEL", p.btcLabel),
     hrp: env("BTC_HRP", "bcrt"),
     blockSecs: num("BTC_BLOCK_SECS", 600),
     minSats: num("MIN_BTC_SATS", 50000),

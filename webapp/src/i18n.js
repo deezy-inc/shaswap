@@ -570,8 +570,23 @@ try {
 
 export const getLang = () => lang;
 export function setLang(l) { lang = DICTS[l] ? l : "en"; try { localStorage.setItem("qbit-swap-lang", lang); } catch {} }
+// Configured coin tickers (window.QBIT_CHAINS labels, injected by serve.js from the coordinator's
+// CHAIN2 pair). Under CHAIN2=bip110 the pair displays as BTC-SHA256 ⇄ BTC-Blake2b; the default qbit
+// pair keeps BTC/QBT, in which case relabeling is a no-op.
+export const tickers = () => ({ btc: globalThis.QBIT_CHAINS?.btc?.label || "BTC", qbt: globalThis.QBIT_CHAINS?.qbit?.label || "QBT" });
+// Replace standalone BTC/QBT ticker tokens with the configured labels. Applied AFTER interpolation so
+// it also catches {coin}-style params carrying the internal symbols. The lookaheads keep an
+// already-labeled "BTC-SHA256"/"BTC-Blake2b" from being re-expanded.
+function relabel(s) {
+  const { btc, qbt } = tickers();
+  if (btc === "BTC" && qbt === "QBT") return s;   // default qbit pair → no-op
+  // Tickers AND the prose coin names: on a relabeled pair (e.g. the BTC fork), "Qbit"/"Bitcoin"/比特币
+  // in copy would be wrong or ambiguous — substitute the configured chain names everywhere.
+  return s.replace(/\bQBT\b(?![\w-])/g, qbt).replace(/\bQbit\b/g, qbt)
+    .replace(/\bBTC\b(?![\w-])/g, btc).replace(/\bBitcoin\b/g, btc).replaceAll("比特币", btc);
+}
 export function t(key, params) {
   let s = (DICTS[lang]?.[key] ?? en[key] ?? key);
   if (params) for (const [k, v] of Object.entries(params)) s = s.replaceAll(`{${k}}`, v);
-  return s;
+  return relabel(s);
 }
