@@ -277,7 +277,11 @@ async function reorgConfs(leg, btcSats, qbtSats, level, btcHeight) {
     costPerConf = btcSub;                                                   // "btc-subsidy": one block ≈ one BTC subsidy of work
   }
   const need = costPerConf > 0 ? Math.max(MIN_CONFS[leg], Math.ceil((REORG_MARGIN * btcSats) / costPerConf)) : UNPRICED_CONFS;
-  return { confs: need, source: cfg.reorgModel === "conftarget-rpc" ? "reorg-cost" : "btc-depth", level, valueBtcSats: btcSats, costPerConfSats: Math.round(costPerConf), ...extra };
+  // Cap the value-scaled depth at the leg's configured ceiling (BTC_MAX_CONFS / ALT_MAX_CONFS): beyond
+  // it the marginal work-cost per conf stops being a meaningful security increase and only stretches the
+  // timelock window. A leg with no cap (maxConfs unset) scales unbounded as before.
+  const capped = cfg.maxConfs > 0 ? Math.min(need, cfg.maxConfs) : need;
+  return { confs: capped, source: cfg.reorgModel === "conftarget-rpc" ? "reorg-cost" : "btc-depth", level, valueBtcSats: btcSats, costPerConfSats: Math.round(costPerConf), ...extra };
 }
 
 // Wall-clock timelock windows derived from the gate's maturity (or forced fixed via env, for regtest).

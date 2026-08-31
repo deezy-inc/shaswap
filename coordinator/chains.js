@@ -78,6 +78,11 @@ export function chainCfg(leg) {
     minConfs: num("MIN_CONFS_BTC", 1),
     script: env("BTC_SCRIPT", "p2wsh-ecdsa"),
     reorgModel: env("BTC_REORG_MODEL", "btc-subsidy"),
+    // Hard ceiling on the value-scaled confirmation depth for the BTC leg. One BTC conf ≈ one block
+    // subsidy of work (≈3.125 BTC); at REORG_MARGIN=3× that's ≈9.4 BTC of reorg cost per conf, so 3
+    // confs secure up to ~3 BTC of swap value — beyond that the model is over-conservative and the wait
+    // just grows the timelock without meaningfully raising the bar. Default 3; env-overridable.
+    maxConfs: num("BTC_MAX_CONFS", 3),
     fixedConfs: num("BTC_FIXED_CONFS", 6),
     trustUnconfirmed: flag("BTC_TRUST_UNCONFIRMED"),
     replayOpReturn: flag("BTC_REPLAY_OPRETURN", p.btcReplay),   // preset default: ON for the bip110 pair
@@ -95,6 +100,7 @@ export function chainCfg(leg) {
     fixedConfs: Number(alt("FIXED_CONFS", "QBIT_FIXED_CONFS", p.fixedConfs)),
     fixedScaleBtc: Number(alt("FIXED_SCALE_BTC", "QBIT_FIXED_SCALE_BTC", p.fixedScaleBtc ?? 0.01)),
     fixedMaxConfs: Number(alt("FIXED_MAX_CONFS", "QBIT_FIXED_MAX_CONFS", p.fixedMaxConfs ?? 12)),
+    maxConfs: Number(alt("MAX_CONFS", "QBIT_MAX_CONFS", 0)),   // 0 = no cap (conftarget-rpc prices it)
     trustUnconfirmed: flag("ALT_TRUST_UNCONFIRMED") || flag("QBIT_TRUST_UNCONFIRMED"),
     replayOpReturn: flag("ALT_REPLAY_OPRETURN") || flag("QBIT_REPLAY_OPRETURN"),
   };
