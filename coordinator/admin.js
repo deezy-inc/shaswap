@@ -259,8 +259,9 @@ const H=()=>({"x-admin-token":TOKEN});
 const api=(p)=>fetch(p,{headers:H()}).then(r=>{if(r.status===401)throw new Error("401");return r.json()});
 const short=(id)=>id?id.slice(0,8):"—";
 const sat=(n)=>n==null?"—":(n>=1e5?(n/1e8).toFixed(n%1e8?4:0)+" ":"")+(n>=1e5?"":n+" sat");
-const btc=(n)=>n==null?"—":(n/1e8).toFixed(8).replace(/0+$/,"").replace(/\\.$/,"")+" BTC";
-const qbt=(n)=>n==null?"—":(n/1e8).toFixed(8).replace(/0+$/,"").replace(/\\.$/,"")+" QBT";
+let LBL={btc:"BTC",qbt:"QBT"};   // pair labels from /api/overview (BTC-SHA256/BTC-Blake2b on a fork pair)
+const btc=(n)=>n==null?"—":(n/1e8).toFixed(8).replace(/0+$/,"").replace(/\\.$/,"")+" "+LBL.btc;
+const qbt=(n)=>n==null?"—":(n/1e8).toFixed(8).replace(/0+$/,"").replace(/\\.$/,"")+" "+LBL.qbt;
 const ago=(t)=>{if(!t)return"—";const s=(Date.now()-t)/1e3;if(s<60)return Math.floor(s)+"s";if(s<3600)return Math.floor(s/60)+"m";if(s<86400)return Math.floor(s/3600)+"h";return Math.floor(s/86400)+"d"};
 const BADGE={CREATED:"b-created",READY:"b-created",FROM_FUNDED:"b-fund",TO_FUNDED:"b-fund",MATURING:"b-mature",CLAIMABLE:"b-claim",CLAIMED:"b-claim",COMPLETE:"b-complete",REFUNDED:"b-refund",ABORTED:"b-refund"};
 const badge=(st)=>'<span class="badge '+(BADGE[st]||"b-created")+'">'+st+'</span>';
@@ -289,7 +290,8 @@ async function refreshOverview(){
   const o=await api("/api/overview");
   $("#net").textContent=o.network;
   const cp=(el,c,label)=>{const e=$(el);e.textContent=label+" "+(c.ok?("#"+c.height):"down")+" · "+c.backend;e.style.color=c.ok?"":"var(--bad)"};
-  cp("#btcp",o.chains.btc,"BTC");cp("#qbtp",o.chains.qbit,"QBT");
+  if(o.labels)LBL={btc:o.labels.btc||"BTC",qbt:o.labels.qbit||"QBT"};
+  cp("#btcp",o.chains.btc,LBL.btc);cp("#qbtp",o.chains.qbit,LBL.qbt);
   const t=o.totals;
   const risk=t.atRisk||0;
   const cards=[
@@ -327,8 +329,8 @@ async function refreshSwaps(){
   SWAPS=new Map(list.map(s=>[s.id,s]));renderRows();
 }
 function rowHtml(s){
-  const dir=s.direction==="btc2qbt"?"BTC→QBT":"QBT→BTC";
-  const funded='<span class="dots" title="BTC / QBT funding">'+dd(s.funded.btc)+dd(s.funded.qbit)+'</span>';
+  const dir=s.direction==="btc2qbt"?LBL.btc+"→"+LBL.qbt:LBL.qbt+"→"+LBL.btc;
+  const funded='<span class="dots" title="'+LBL.btc+' / '+LBL.qbt+' funding">'+dd(s.funded.btc)+dd(s.funded.qbit)+'</span>';
   const parties='<span class="dots" title="alice / bob online">'+dd(s.online.alice)+dd(s.online.bob)+'</span>';
   const armed='<span class="dots" title="watchtower armed: alice / bob">'+dd(s.armed.alice)+dd(s.armed.bob)+'</span>';
   const risky=s.risk&&s.risk.length;
@@ -371,7 +373,7 @@ async function refreshWatchtower(){
 let logn=0;
 function logLine(s){
   const box=$("#loglines");if(!box)return;
-  const dir=s.direction==="btc2qbt"?"BTC→QBT":"QBT→BTC";
+  const dir=s.direction==="btc2qbt"?LBL.btc+"→"+LBL.qbt:LBL.qbt+"→"+LBL.btc;
   const el=document.createElement("div");el.className="logline";
   el.innerHTML='<span class="mono">'+new Date().toLocaleTimeString()+'</span> · <b>'+short(s.id)+'</b> '+dir+' → '+badge(s.state);
   box.prepend(el);if(++logn>60)box.lastChild?.remove();
