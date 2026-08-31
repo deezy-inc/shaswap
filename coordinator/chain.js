@@ -20,10 +20,20 @@ import { hexToBytes, bytesToHex } from "@noble/hashes/utils.js";
 const pexec = promisify(execFile);
 
 const env = (k, d) => process.env[k] ?? d;
-const backendOf = (name) => env(`${name.toUpperCase()}_BACKEND`, env("COORD_CHAIN", "dev"));
-const cliOf = (name) => env(`${name.toUpperCase()}_CLI`, `${name === "btc" ? "bitcoin-cli" : "qbit-cli"} -regtest -rpcuser=lab -rpcpassword=lab`);
-const sshOf = (name) => env(`${name.toUpperCase()}_SSH_HOST`, "");      // empty = run the CLI locally
-const rpcUrlOf = (name) => env(`${name.toUpperCase()}_RPC_URL`, "");
+// Second-slot env names follow the ACTIVE preset: under CHAIN2=bip110 the canonical names are
+// BIP110_BACKEND / BIP110_RPC_URL / BIP110_WATCH / BIP110_WATCH_WALLET — the legacy QBIT_* names
+// still work as a fallback so the default (qbit) pair and old deployments are untouched.
+const slotEnv = (name, suffix, d) => {
+  if (name === "qbit" && env("CHAIN2", "qbit") === "bip110" && env(`BIP110_${suffix}`) != null) return env(`BIP110_${suffix}`);
+  return env(`${name.toUpperCase()}_${suffix}`, d);
+};
+const backendOf = (name) => slotEnv(name, "BACKEND", env("COORD_CHAIN", "dev"));
+const cliOf = (name) => slotEnv(name, "CLI", `${name === "btc" ? "bitcoin-cli" : "qbit-cli"} -regtest -rpcuser=lab -rpcpassword=lab`);
+const sshOf = (name) => slotEnv(name, "SSH_HOST", "");      // empty = run the CLI locally
+const rpcUrlOf = (name) => slotEnv(name, "RPC_URL", "");
+// Watch-only wallet name, per leg (BTC_WATCH_WALLET / QBIT_WATCH_WALLET / BIP110_WATCH_WALLET),
+// falling back to the shared legacy WATCH_WALLET so existing deployments keep working.
+const watchWalletOf = (name) => slotEnv(name, "WATCH_WALLET", env("WATCH_WALLET", "qbitswap-watch"));
 
 // ── Esplora REST client with rate-limit handling (shared min-interval + 429/5xx backoff) ──────
 const ESPLORA_URL = env("ESPLORA_URL", "https://mempool.space/api").replace(/\/$/, "");
@@ -49,7 +59,7 @@ const scripthash = (spkHex) => bytesToHex(sha256(hexToBytes(spkHex)).reverse());
 export class Chain {
   // watch method for the rpc backend: "wallet" (watch-only import — mainnet-safe, needed for Bitcoin)
   // or "scan" (scantxoutset — fine on a small UTXO set like Qbit's, and no p2mr-descriptor dependency).
-  constructor(name) { this.name = name; this.backend = backendOf(name); this.watch = env(`${name.toUpperCase()}_WATCH`, name === "btc" ? "wallet" : "scan"); }
+  constructor(name) { this.name = name; this.backend = backendOf(name); this.watch = slotEnv(name, "WATCH", name === "btc" ? "wallet" : "scan"); }
 
   // ── dev/rpc transport ────────────────────────────────────────────────────────
   async rpc(...args) { return this.backend === "rpc" ? this.#jsonRpc(this.#coerce(args)) : this.#cli(this.#coerce(args)); }
@@ -159,7 +169,7 @@ export class Chain {
   // Import an HTLC scriptPubKey into a dedicated watch-only wallet, forward-only (no historical rescan
   // — HTLC addresses are fresh). Idempotent per process; safe to call every poll.
   async #ensureWatched(spkHex) {
-    if (!this._watched) { this._watchWallet = env("WATCH_WALLET", "qbitswap-watch"); this._watched = new Set(); await this.#openWallet(this._watchWallet); }
+    if (!this._watched) { this._watchWallet = watchWalletOf(this.name); this._watched = new Set(); await this.#openWallet(this._watchWallet); }
     if (this._watched.has(spkHex)) return this._watchWallet;
     await this.#importSpk(this._watchWallet, spkHex);
     this._watched.add(spkHex);
@@ -186,7 +196,7 @@ export class Chain {
     const droppable = [...this._watched].filter((s) => !keep.has(s)).length;
     if (droppable < Math.max(1, threshold)) return;
     const gen = (this._gen || 0) + 1;
-    const next = `${env("WATCH_WALLET", "qbitswap-watch")}-g${gen}`;
+    const next = `${watchWalletOf(this.name)}-g${gen}`;
     await this.#openWallet(next);
     for (const spk of keep) { try { await this.#importSpk(next, spk); } catch { /* skip */ } }
     const prev = this._watchWallet;
@@ -225,7 +235,7 @@ export class Chain {
     if (this.backend === "rpc") {
       // Pruned-safe: read via the watch-only wallet — gettransaction returns wallet-relevant txs
       // (the claim spends an address we watch) without needing txindex. Fall back to getrawtransaction.
-      try { const g = await this.rpcWallet(this._watchWallet || env("WATCH_WALLET", "qbitswap-watch"), "gettransaction", txid, true, true); if (g?.decoded) return g.decoded; } catch { /* not a wallet tx */ }
+      try { const g = await this.rpcWallet(this._watchWallet || watchWalletOf(this.name), "gettransaction", txid, true, true); if (g?.decoded) return g.decoded; } catch { /* not a wallet tx */ }
     }
     return this.rpc("getrawtransaction", txid, true);
   }

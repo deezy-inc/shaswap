@@ -6,6 +6,7 @@
 import { randomBytes } from "node:crypto";
 import { bytesToHex as hex } from "@noble/hashes/utils.js";
 import { addressToScriptPubKey, splitterAddress } from "@qbit-swap/client";
+import { hasReplayMarker } from "../../coordinator/chains.js";
 import { SwapClient } from "../src/swapflow.js";
 import { installMocks } from "./mockchain.mjs";
 
@@ -56,6 +57,7 @@ async function main() {
     const sweepTxid = mock.btc.spentBy.get(`${btcTxid}:0`);
     const sweep = mock.btc.tx.get(sweepTxid);
     ck(!!sweep && hex(sweep.vout[0][1]) === hex(addressToScriptPubKey(A.btcDest)), "…to the funder's own refund address");
+    ck(!hasReplayMarker(sweep.vout), "the refund carries NO replay marker (it pays its own funder — a replay is harmless)");
   }
 
   // ── 2) solo arm must not break the happy path: second leg lands → full bundle → COMPLETE ───────

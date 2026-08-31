@@ -359,7 +359,7 @@ export class SwapClient {
     }
     // Fork replay protection: on a flagged leg every sweep carries the >83-byte OP_RETURN marker (the
     // coordinator refuses marker-less sweeps there; BIP-110 policy keeps the tx off the fork chain).
-    return btcSpend({ prevTxidLE: bin(f.txid).reverse(), vout: f.vout, amount: f.amountSats, ws, priv: this.#privOf(leg), destSpk, outVal, branch, preimage, locktime: branch === "refund" ? v.locktimes[leg] : 0, extraOut, replay: this.replayOf(leg) });
+    return btcSpend({ prevTxidLE: bin(f.txid).reverse(), vout: f.vout, amount: f.amountSats, ws, priv: this.#privOf(leg), destSpk, outVal, branch, preimage, locktime: branch === "refund" ? v.locktimes[leg] : 0, extraOut, replay: this.replayOf(leg) && branch !== "refund" });   // refunds pay our own address — a replayed refund is harmless (and returns our twin), so no marker
   }
 }
 
@@ -420,7 +420,7 @@ const VBYTES = { get btc() { return FAMILY_VBYTES[legFam("btc")]; }, get qbit() 
 // so the network fee is sized for the real transaction.
 const FEE_OUT_VB = 43, REPLAY_VB = 112;
 const feeVbytes = (v, leg, kind) => (leg === "btc" && kind === "claim" && v.fee?.sats > 0 ? FEE_OUT_VB : 0)
-  + ((v.chains?.[leg]?.replayOpReturn || globalThis.QBIT_CHAINS?.[leg]?.replayOpReturn) ? REPLAY_VB : 0);
+  + (kind === "claim" && (v.chains?.[leg]?.replayOpReturn || globalThis.QBIT_CHAINS?.[leg]?.replayOpReturn) ? REPLAY_VB : 0);   // refunds carry no marker
 // Absolute fee floor (sats): never pay below the node's own min-relay feerate for this tx's size
 // (`feerates.<leg>.minimumFee` — BTC from mempool.space, Qbit from getmempoolinfo). No hardcoded floor.
 const relayFloor = (leg, kind, feerates, extraVb = 0) => Math.ceil(Math.max(1, feerates?.[leg]?.minimumFee || 1) * (VBYTES[leg][kind] + extraVb));

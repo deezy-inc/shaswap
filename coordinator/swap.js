@@ -526,7 +526,10 @@ export async function broadcast(s, leg, kind, txHex) {
   // marker (BIP-110 policy refuses to relay/mine it on the fork chain, so this sweep settles on exactly
   // one side of the pair). ENFORCED, not advisory — a marker-less sweep would replay across the fork
   // and can hand the counterparty both sides of history. Clients build it (btcSpend `replay: true`).
-  if (chainCfg(leg).replayOpReturn && !hasReplayMarker(parseTx(bin(txHex)).vout))
+  // Refunds are exempt: a refund pays the funder's OWN address, so a cross-fork replay of it can only
+  // return that same funder's twin coins — harmless (it's exactly what the twin sweep does). Claims
+  // stay enforced: replayed, they'd hand the counterparty both sides of history.
+  if (kind !== "refund" && chainCfg(leg).replayOpReturn && !hasReplayMarker(parseTx(bin(txHex)).vout))
     throw new Error(`this ${chainCfg(leg).label} ${kind} lacks the replay-protection OP_RETURN (>83 bytes) — rebuild the sweep with the replay marker`);
   const chain = chainOf(leg);
   const acc = await chain.testAccept(txHex);
@@ -557,7 +560,7 @@ export function submitFinish(s, role, bundle) {
   // through broadcast()'s check, so validate every tier on a replay-protected leg at upload time.
   // (For `twin`, b.leg is the broadcast chain, so the marker requirement lands exactly where it must:
   // a twin sweep broadcast on the marker leg carries the marker; one for the fork leg must not.)
-  for (const kind of ["claim", "refund", "twin"]) {
+  for (const kind of ["claim", "twin"]) {   // refund tiers are exempt (see broadcast(): a replayed refund only pays its own funder)
     const b = bundle[kind];
     if (!b?.tiers?.length || !["btc", "qbit"].includes(b.leg) || !chainCfg(b.leg).replayOpReturn) continue;
     for (const t of b.tiers) if (!hasReplayMarker(parseTx(bin(t.tx)).vout))

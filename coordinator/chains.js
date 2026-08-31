@@ -104,6 +104,17 @@ export function validateChains() {
     if (c.trustUnconfirmed) console.error(`[chains] ⚠ ${leg} (${c.label}): TRUST-UNCONFIRMED ON — 0-conf deposits treated as final; safe only between trusted parties`);
     if (c.replayOpReturn) console.error(`[chains] ${leg} (${c.label}): replay protection ON — sweeps must carry a >83-byte OP_RETURN`);
   }
+  // Under CHAIN2=bip110 the second slot's node config must use the BIP110_* names — refusing to boot
+  // on the legacy QBIT_* names keeps a fork-pair deployment from silently pointing at a qbit node.
+  // Dev/mock backends (COORD_CHAIN=dev harnesses) are exempt: they have no node to configure.
+  if (chain2Preset() === "bip110") {
+    const be = env("BIP110_BACKEND", null), legacy = env("QBIT_BACKEND", null);
+    const effective = be || legacy || env("COORD_CHAIN", "dev");
+    if (effective !== "dev") {
+      if (!be) throw new Error(`CHAIN2=bip110 requires BIP110_BACKEND${legacy ? " (found legacy QBIT_BACKEND — rename it and its siblings to BIP110_*)" : ""}`);
+      if (be === "rpc" && !env("BIP110_RPC_URL", null)) throw new Error("CHAIN2=bip110 with BIP110_BACKEND=rpc requires BIP110_RPC_URL");
+    }
+  }
   const [b, q] = [chainCfg("btc"), chainCfg("qbit")];
   console.log(`[chains] pair: ${b.label} (${b.script}) ⇄ ${q.label} (${q.script}) · CHAIN2=${chain2Preset()}`);
 }

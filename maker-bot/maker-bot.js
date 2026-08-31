@@ -71,7 +71,7 @@ export class MakerBot {
     const tx = btcSpend({
       prevTxidLE: bin(f.txid).reverse(), vout: f.vout, amount: f.amountSats, ws, priv: qbit.sk,
       destSpk, outVal: f.amountSats - this.feeSats.qbit, branch: kind, preimage,
-      locktime: kind === "refund" ? v.locktimes.qbit : 0, replay: this.#replayOf("qbit"),
+      locktime: kind === "refund" ? v.locktimes.qbit : 0, replay: this.#replayOf("qbit") && kind !== "refund",
     });
     const r = await this.#api(`/swaps/${id}/broadcast`, { token, method: "POST", body: { leg: "qbit", kind, tx: hex(tx) } });
     this.log(`[maker] ${kind === "claim" ? "claimed" : "refunded"} ${this.chains?.qbit?.label || "ALT"} ${r.txid.slice(0, 12)} -> ${r.state}`);
@@ -424,7 +424,7 @@ export class MakerBot {
     const f = v.funding.btc, ws = bin(v.htlc.btc.witnessScript);
     const tx = btcSpend({
       prevTxidLE: bin(f.txid).reverse(), vout: f.vout, amount: f.amountSats, ws, priv: btcPriv,
-      destSpk, outVal: f.amountSats - this.feeSats.btc, branch: "refund", locktime: v.locktimes.btc, replay: this.#replayOf("btc"),
+      destSpk, outVal: f.amountSats - this.feeSats.btc, branch: "refund", locktime: v.locktimes.btc, replay: false,   // refunds pay our own address — no marker needed
     });
     const r = await this.#api(`/swaps/${id}/broadcast`, { token, method: "POST", body: { leg: "btc", kind: "refund", tx: hex(tx) } });
     this.log(`[maker] refunded BTC ${r.txid.slice(0, 12)} -> ${r.state}`);

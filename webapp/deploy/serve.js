@@ -18,7 +18,9 @@ import { dirname, join, extname } from "node:path";
 import { startServer } from "../../coordinator/server.js";
 import { startAdmin } from "../../coordinator/admin.js";
 import { MIN_SATS } from "../../coordinator/swap.js";   // single source of truth for the min swap value (env-driven)
-import { publicChains, chain2Preset } from "../../coordinator/chains.js";   // per-leg chain identity (CHAIN2 preset) — injected so keys/signing/replay match the pair
+import { publicChains, chain2Preset } from "../../coordinator/chains.js";
+import { qbit as qbitChain, btc as btcChain } from "../../coordinator/chain.js";
+const chainOf = (l) => (l === "btc" ? btcChain : qbitChain);   // per-leg chain identity (CHAIN2 preset) — injected so keys/signing/replay match the pair
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PUBLIC_URL = (process.env.PUBLIC_URL || "http://127.0.0.1:8080").replace(/\/$/, "");
@@ -158,7 +160,7 @@ async function main() {
   console.log(`  ┌──────────────────────────────────────────────────────────────`);
   console.log(`  │  Public URL:  ${PUBLIC_URL}   (front this ${BIND}:${WEB} with a tunnel)`);
   console.log(`  │  same-origin: ${PUBLIC_URL}/coord   ·   network: ${NETWORK}  hrps=${JSON.stringify(hrps)}`);
-  console.log(`  │  BTC=${process.env.BTC_BACKEND || "dev"}  QBIT=${process.env.QBIT_BACKEND || "dev"}  (chains over the tailnet)`);
+  console.log(`  │  legs: ${["btc", "qbit"].map((l) => `${l}=${chainOf(l).backend}`).join("  ")}  (chains over the tailnet)`);
   console.log(`  └──────────────────────────────────────────────────────────────\n`);
 }
 main().catch((e) => { console.error("serve failed:", e.message); process.exit(1); });

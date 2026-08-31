@@ -66,7 +66,7 @@ export function serializeSegwit(version, vin, vout, witnesses, locktime) {
 export const REPLAY_PAYLOAD_BYTES = 100;
 export function replayMarkerSpk() {
   const payload = new Uint8Array(REPLAY_PAYLOAD_BYTES);
-  payload.set(new TextEncoder().encode("qbit-swap replay guard: this transaction is intended for exactly one chain of a policy fork.").slice(0, REPLAY_PAYLOAD_BYTES));
+  payload.set(new TextEncoder().encode("shaswap replay guard: this transaction is intended for exactly one chain of a policy fork.").slice(0, REPLAY_PAYLOAD_BYTES));
   return concatBytes(u8(0x6a, 0x4c, REPLAY_PAYLOAD_BYTES), payload);
 }
 
