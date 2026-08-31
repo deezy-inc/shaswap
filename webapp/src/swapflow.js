@@ -150,6 +150,13 @@ export class SwapClient {
 
   async #onView(v) {
     this.view = v;
+    // Self-heal: if the coordinator shows OUR party slot empty even though we already joined (e.g. it
+    // restarted before our submission persisted), re-submit — idempotent under the first-come lock
+    // (same keys), and throttled so a slow view can't stampede it.
+    if (!v.self && this.btcDest && this.qbit && this.btcPriv && !this.halted && !this._resub) {
+      this._resub = setTimeout(() => { this._resub = null; }, 5000);
+      this.#submit().catch(() => {});
+    }
     // Independently re-derive the HTLC scripts from OUR keys + the counterparty pubkey + H + locktimes
     // and confirm they match the coordinator's. If not, a derivation bug or tampering produced a script
     // we don't control — HALT before any funds move.

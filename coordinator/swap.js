@@ -86,7 +86,11 @@ export function subscribe(id, cb) {
 // Global subscription: fires on ANY swap's change. Drives the admin dashboard's live feed.
 const allSubs = new Set();
 export function subscribeAll(cb) { allSubs.add(cb); return () => allSubs.delete(cb); }
-const sigOf = (s) => JSON.stringify({ st: s.state, f: s.funding, r: s.refund, p: s.preimage, b: s.broadcasts, fn: [!!s.finish?.alice, !!s.finish?.bob], tw: s.twin });
+// The signature must cover EVERY field a restart can't recompute from chain state — party data and H
+// arrive once from clients and exist nowhere else. (A join used to leave the sig unchanged, so a
+// coordinator restart before the SECOND party joined silently dropped the first joiner's keys and
+// wedged the swap in CREATED with no way forward.)
+const sigOf = (s) => JSON.stringify({ st: s.state, f: s.funding, r: s.refund, p: s.preimage, b: s.broadcasts, fn: [!!s.finish?.alice, !!s.finish?.bob], tw: s.twin, pa: s.party?.alice?.btcPub, pb: s.party?.bob?.btcPub, H: s.H, sf: s.shortFunded, wt: s.wt });
 function emit(s) {
   for (const cb of subs.get(s.id) || []) { try { cb(s); } catch { /* dead listener */ } }
   for (const cb of allSubs) { try { cb(s); } catch { /* dead listener */ } }

@@ -9,9 +9,16 @@ globalThis.fetch = async () => { throw new Error("no network in this test"); };
 
 let ok = true; const ck = (c, m) => { console.log((c ? "[ok] " : "[FAIL] ") + m); ok = ok && c; };
 
-const { createSwap } = await import("./swap.js");
+const { createSwap, submitParty } = await import("./swap.js");
 const a = createSwap({ btcSats: 20_000_000, qbtSats: 100_000_000 });
 const b = createSwap({ btcSats: 50_000_000, qbtSats: 300_000_000 });
+
+// A LONE party joining must persist immediately: party/H arrive once from the client and can't be
+// recomputed from chain state. They weren't in the change signature, so a restart between the first
+// and second join dropped the first joiner's keys and wedged the swap in CREATED forever.
+await submitParty(a, "alice", { qbitPub: "aa", btcPub: "bb", btcDest: "adr1", qbitDest: "adr2", H: "cc" });
+const joined = JSON.parse(readFileSync(DB, "utf8")).find((s) => s.id === a.id);
+ck(joined?.party?.alice?.btcPub === "bb" && joined?.H === "cc", "a single join (party + H) persists before the second party arrives");
 
 ck(existsSync(DB), "COORD_DB snapshot written on a state change");
 ck(!existsSync(DB + ".tmp"), "no leftover .tmp file after the atomic rename");
