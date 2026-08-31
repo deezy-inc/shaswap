@@ -807,7 +807,7 @@ function stepBackup(next) {
   const cont = h("button", { class: "primary", style: "width:100%;margin-top:16px", disabled: true, onclick: () => next() }, t("continue"));
   const chk = h("input", { type: "checkbox", style: "width:auto;margin:2px 9px 0 0;flex:0 0 auto", onchange: () => { cont.disabled = !(downloaded && chk.checked); } });
   const confirmRow = h("label", { style: "display:none;margin-top:16px;align-items:flex-start;gap:2px;font-size:13px;color:var(--fg);cursor:pointer" }, chk, h("span", {}, t("confirmSavedBackup")));
-  const dl = h("button", { onclick: () => { saveFile(`qbit-swap-${flow.client.id.slice(0, 8)}.json`, exportBackup(flow.client.secrets())); downloaded = true; dl.textContent = t("backupDownloaded"); confirmRow.style.display = "flex"; } }, t("downloadBackupBtn"));
+  const dl = h("button", { onclick: () => { saveFile(`${BRAND === "bip110" ? "shaswap" : "qbit-swap"}-${flow.client.id.slice(0, 8)}.json`, exportBackup(flow.client.secrets())); downloaded = true; dl.textContent = t("backupDownloaded"); confirmRow.style.display = "flex"; } }, t("downloadBackupBtn"));
   render(h("div", { class: "card" },
     h("h2", {}, t("saveBackup")),
     h("p", { class: "note", style: "margin-top:-4px" }, t("backupSub")),
