@@ -907,8 +907,13 @@ function startLive() {
   flow._tick = setInterval(() => { if (!flow._verifying && flow.client?.view) renderLive(liveCard, flow.client.view); }, 15000);
 }
 const STATE_CLASS = { COMPLETE: "good", REFUNDED: "warn", CLAIMABLE: "info", CLAIMED: "info", ABORTED: "bad", CANCELED: "warn" };
-// Public block explorers for the tx links in the timeline.
-const EXPLORER = { btc: "https://mempool.space/tx/", qbit: "https://qbitmempool.robertclarke.com/tx/" };
+// Public block explorers for the tx links in the timeline. Derived from the injected chain config
+// (QBIT_CHAINS): on the bip110 fork pair the BTC explorer is the pair's own instance (mempool.guide),
+// not a Qbit-branded one; the qbit pair uses mempool.space / the Qbit mempool.
+const _CFG = globalThis.QBIT_CHAINS || {};
+const _btcExplorer = _CFG.btc?.explorer || "https://mempool.space/tx/";
+const _qbitExplorer = _CFG.qbit?.explorer || "https://qbitmempool.robertclarke.com/tx/";
+const EXPLORER = { btc: _btcExplorer, qbit: _qbitExplorer };
 const txLink = (leg, txid) => h("a", { href: EXPLORER[leg] + txid, target: "_blank", rel: "noopener" }, shorten(txid, 8));
 // Confirmation progress under a deposit: "X / Y confirmations · ~Zm" for the reorg-safe-gated leg,
 // or just "X confirmations" for the other. ETA uses average mainnet block times.
@@ -940,8 +945,8 @@ function confSub(v, leg, fund) {
 function fundWaitEl(s) {
   const key = s.leg === "btc" ? (s.mine ? "tlWaitBtcMine" : "tlWaitBtcCp") : (s.mine ? "tlWaitQbtMine" : "tlWaitQbtCp");
   const el = h("span", { class: "tl-conf" }, t(key));
-  // Live BTC ETA (mainnet only): size the tx's fee rate against mempool.space's current tiers.
-  if (s.mem && s.leg === "btc" && EXPLORER.btc.includes("mempool.space") && s.txid)
+  // Live BTC ETA (mainnet only): size the tx's fee rate against the pair's BTC explorer feerate API.
+  if (s.mem && s.leg === "btc" && EXPLORER.btc && s.txid)
     btcConfEta(s.txid).then((eta) => { if (eta) el.textContent = `${t(key)} · ${t("tlEstConf", { eta })}`; }).catch(() => {});
   return el;
 }

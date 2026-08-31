@@ -3,7 +3,8 @@
 // used to size live claims/refunds (the client reads them from the swap view) and to pick/escalate the
 // watchtower's pre-signed fee-ladder tier.
 import { qbit } from "./chain.js";
-const URL = (process.env.MEMPOOL_URL || "https://mempool.space/api").replace(/\/$/, "");
+import { pairEsploraUrl } from "./chains.js";
+const URL = (process.env.MEMPOOL_URL || pairEsploraUrl()).replace(/\/$/, "");
 const TTL = Number(process.env.FEES_TTL_MS || 90000);
 let cache = null, at = 0;
 

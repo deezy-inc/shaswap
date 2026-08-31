@@ -36,7 +36,10 @@ const rpcUrlOf = (name) => slotEnv(name, "RPC_URL", "");
 const watchWalletOf = (name) => slotEnv(name, "WATCH_WALLET", env("WATCH_WALLET", "qbitswap-watch"));
 
 // ── Esplora REST client with rate-limit handling (shared min-interval + 429/5xx backoff) ──────
-const ESPLORA_URL = env("ESPLORA_URL", "https://mempool.space/api").replace(/\/$/, "");
+// The BTC-side Esplora says which chain's prices we read; it MUST be the pair's own endpoint
+// (mempool.guide for the bip110/shaswap pair) not a general Qbit service — CHAIN2-aware via chains.js.
+import { pairEsploraUrl } from "./chains.js";
+const ESPLORA_URL = pairEsploraUrl().replace(/\/$/, "");
 const ESPLORA_MIN_INTERVAL_MS = Number(env("ESPLORA_MIN_INTERVAL_MS", 150));   // ~6.6 req/s ceiling
 const ESPLORA_MAX_RETRIES = Number(env("ESPLORA_MAX_RETRIES", 6));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

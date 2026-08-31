@@ -9,6 +9,7 @@
 // or a bot's own RPC) — this library only builds and signs.
 
 export * as encoding from "./encoding.js";
+export { checkLocktime } from "./encoding.js";
 
 // ── Qbit (p2mr) leg ─────────────────────────────────────────────────────────
 export {

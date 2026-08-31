@@ -13,6 +13,7 @@ import { createSwap } from "./swap.js";
 const offers = new Map();
 const token = () => randomBytes(16).toString("hex");
 const COINS = new Set(["BTC", "QBT"]);
+const OFFER_TTL_MS = Number(process.env.OFFER_TTL_MS || 86_400_000);   // 24h: stale offers expire and are swept
 
 export function createOffer({ giveCoin, giveSats, wantCoin, wantSats }) {
   if (!COINS.has(giveCoin) || !COINS.has(wantCoin) || giveCoin === wantCoin) throw new Error("pair must be one of BTC/QBT for each side");
@@ -32,6 +33,13 @@ export function createOffer({ giveCoin, giveSats, wantCoin, wantSats }) {
 export const getOffer = (id) => offers.get(id);
 export const allOffers = () => [...offers.values()];   // admin/monitoring: every offer, any status
 export const isMaker = (o, tok) => tok && tok === o.makerToken;
+
+// Expire stale open offers so an abandoned offer doesn't sit in the book (and in memory) forever.
+// Called periodically from the server's watcher tick; safe to call any time.
+export function sweepOffers() {
+  const now = Date.now();
+  for (const [id, o] of offers) if (o.status === "open" && now - o.createdAt > OFFER_TTL_MS) offers.delete(id);
+}
 
 const publicFields = (o) => ({ id: o.id, side: o.side, giveCoin: o.giveCoin, giveSats: o.giveSats, wantCoin: o.wantCoin, wantSats: o.wantSats, qbtSats: o.qbtSats, btcSats: o.btcSats, price: o.price, createdAt: o.createdAt });
 // Public book: open offers, best price first (asks ascending, bids descending).

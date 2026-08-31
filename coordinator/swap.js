@@ -34,6 +34,11 @@ const chainOf = (leg) => (leg === "btc" ? btc : qbit);
 const swaps = new Map();
 const token = () => randomBytes(16).toString("hex");
 
+// ── active-swap cap ───────────────────────────────────────────────────────────────────────────────
+// The in-memory working set is polled against both nodes every tick; an unbounded set is a DoS vector.
+// Cancel-able (CREATED) swaps and terminal ones are excluded from the count.
+const MAX_ACTIVE_SWAPS = Number(process.env.MAX_ACTIVE_SWAPS || 2000);
+
 // ── persistence (optional; COORD_DB → .db/.sqlite = per-row sqlite, else JSON snapshot) ──────────────
 // The store checkpoints in-memory state so a restart resumes in-flight swaps. touch() writes just the
 // changed swap (O(1) on the sqlite backend), so this scales past the JSON snapshot's full-file rewrite.
@@ -253,8 +258,14 @@ const btcSubsidySats = (h) => Math.floor(5_000_000_000 / 2 ** Math.floor(h / 210
 //                      exotic hashrate markets — e.g. the Blake2b fork; value scaling doesn't apply).
 async function reorgConfs(leg, btcSats, qbtSats, level, btcHeight) {
   const cfg = chainCfg(leg);
-  if (cfg.reorgModel === "fixed")
-    return { confs: Math.max(MIN_CONFS[leg], cfg.fixedConfs), source: "fixed", level, valueBtcSats: btcSats };
+  if (cfg.reorgModel === "fixed") {
+    // Value-scaled fixed depth: `fixedConfs` at the configured scale (fixedScaleBtc BTC), +1 conf per
+    // value doubling, capped at fixedMaxConfs. Small swaps settle fast; big ones get a deep burial.
+    const satsPerBtc = 1e8, scaleSats = (cfg.fixedScaleBtc || 0.01) * satsPerBtc;
+    const extra = btcSats > scaleSats ? Math.ceil(Math.log2(btcSats / scaleSats)) : 0;
+    const confs = Math.min(cfg.fixedMaxConfs || cfg.fixedConfs, Math.max(MIN_CONFS[leg], cfg.fixedConfs + extra));
+    return { confs, source: "fixed", level, valueBtcSats: btcSats };
+  }
   const btcSub = btcSubsidySats(btcHeight);
   let costPerConf, extra = {};                                             // BTC sats to reorg one confirmation of this leg
   if (cfg.reorgModel === "conftarget-rpc") {
@@ -279,6 +290,13 @@ function htlcWindows(toLeg, confs) {
   return { toSecs, fromSecs: toSecs + FROM_GAP_SECS };
 }
 export function createSwap({ btcSats, qbtSats, securityLevel = "high" }) {
+  // Reject when the active (non-terminal) working set is full, so memory can't grow unboundedly; a
+  // created-but-never-funded swap is reclaimable by its creator. CANCELED and terminal states don't count.
+  if (MAX_ACTIVE_SWAPS > 0) {
+    let active = 0;
+    for (const s of swaps.values()) if (![...TERMINAL, "CANCELED"].includes(s.state)) active++;
+    if (active >= MAX_ACTIVE_SWAPS) throw new Error(`active swap cap (${MAX_ACTIVE_SWAPS}) reached — try again shortly`);
+  }
   // The QBT buyer is ALWAYS the initiator (alice): every swap is btc2qbt (initiator sends BTC, receives
   // QBT). Who sells QBT is chosen purely by which token each party keeps — there is no way to construct
   // a swap where the initiator sells QBT (the reorg-unsafe arrangement).
@@ -326,18 +344,33 @@ export function cancelSwap(s, role) {
   return touch(s);
 }
 
+// First-come lock for pubkeys AND H: once a slot is filled none of these fields may change, and the
+// lock goes in BEFORE any HTLCs are derived. Without this, alice could change H after both parties
+// joined — silently re-deriving both addresses and orphaning any manual/out-of-band funding made to the
+// original address. The lock rejects the change outright.
+// First-come lock for pubkeys AND H: once a slot is filled none of these may change, and the lock goes
+// in BEFORE any HTLCs are derived. Without this, alice could change H after both parties joined —
+// silently re-deriving both addresses and orphaning any manual/out-of-band funding made to the original.
 export async function submitParty(s, role, data) {
   if (s.state === "CANCELED") throw new Error("this swap was canceled");
   if (s.state !== "CREATED" && s.state !== "READY") throw new Error("party data locked");
-  // First-come lock: once a slot is filled it can't be overwritten by different keys. This makes a
-  // shared link single-use — a second person opening the same link is rejected rather than racing to
-  // replace the participant (which could leave the first funder's deposit keyed to someone else). The
-  // same party reconnecting (same keys, e.g. from their backup) is idempotent and allowed.
   const existing = s.party[role];
-  if (existing && (existing.qbitPub !== data.qbitPub || existing.btcPub !== data.btcPub)) throw new Error("this swap has already been joined by someone else");
-  if (role === "alice" && data.H) s.H = data.H;
-  s.party[role] = { qbitPub: data.qbitPub, btcPub: data.btcPub, btcDest: data.btcDest, qbitDest: data.qbitDest };
-  if (s.party.alice && s.party.bob && s.H) await deriveHtlcs(s);
+  // First-come lock: pubkeys AND H are immutable once a slot is filled; H may only be SET once (by
+  // alice's first join). Without the H lock alice could mutate H after both parties joined, silently
+  // re-deriving both HTLC addresses and orphaning manual/out-of-band funding made to the original.
+  if (existing && (existing.btcPub !== data.btcPub || existing.qbitPub !== data.qbitPub)) throw new Error("this swap has already been joined by someone else");
+  if (role === "alice" && s.H && !existing && data.H && data.H !== s.H) throw new Error("H is already locked");
+  // Validate the inputs BEFORE writing party data (so a bad submission can't wedge the swap). Keys are
+  // opaque blobs until derive runs; format-check them at derive-time to stay chain-agnostic.
+  const isHex = (v) => typeof v === "string" && /^[0-9a-f]+$/i.test(v);
+  if (role === "alice" && data.H && !isHex(data.H)) throw new Error("H must be hex");
+  if (role === "alice" && data.H && !s.H) s.H = data.H;   // first-come lock: set-once
+  if (!existing) s.party[role] = { qbitPub: data.qbitPub, btcPub: data.btcPub, btcDest: data.btcDest, qbitDest: data.qbitDest };
+  if (s.party.alice && s.party.bob && s.H) {
+    if (!isHex(s.party.alice.qbitPub) || !isHex(s.party.alice.btcPub)) throw new Error("alice's pubkey material is not hex");
+    if (!isHex(s.party.bob.qbitPub) || !isHex(s.party.bob.btcPub)) throw new Error("bob's pubkey material is not hex");
+    await deriveHtlcs(s);
+  }
   return touch(s);
 }
 
@@ -499,8 +532,11 @@ async function applyEffects(s, leg, kind, txid) {
   }
   if (kind === "refund") { if (s.funding[leg]) s.funding[leg].spent = true; if (s.shortFunded?.[leg]) s.shortFunded[leg].spent = true; s.state = "REFUNDED"; s.settledAt = Date.now(); }
 }
-// A party submits a signed tx; the coordinator broadcasts it (keyless).
+// A party submits a signed tx; the coordinator broadcasts it (keyless). Validate the routing inputs:
+// anything untrusted can only reach chainOf(leg) if it passes the shape check.
 export async function broadcast(s, leg, kind, txHex) {
+  if (!["btc", "qbit"].includes(leg) || !["claim", "refund"].includes(kind))
+    throw new Error(`bad leg/kind ("${leg}"/"${kind}") — refusing to relay`);
   // Never relay the buyer's preimage-revealing claim (toLeg) until BOTH deposits are buried to their
   // reorg/RBF-safe depth:
   //   · fromLeg (BTC) — so the seller's subsequent claim spends a funding tx the buyer can no longer RBF;

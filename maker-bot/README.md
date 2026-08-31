@@ -64,6 +64,18 @@ next-block target, RBF-bumps the child to absorb the whole deficit
 (`childFee' = target×ancestorSize − otherAncestorFees`), capped at `MAKER_MAX_FEERATE` (500 sat/vB).
 The coordinator tracks an RBF'd unconfirmed deposit automatically.
 
+**Light-mode fee cap:** the node-less wallet's funding feerate is additionally hard-capped at
+`LIGHT_MAX_FEERATE` (default 500 sat/vB) so a compromised/garbage public fee oracle can't drain the
+wallet into miner fees.
+
+**Coordinator-trust hardening.** Before the bot locks any funds it independently re-derives both HTLC
+scriptPubKeys from its own keys + the counterparty pubkey + `H` + locktimes and checks they match the
+coordinator's (`#verifyHtlc` — same check the webapp does); a mismatch halts the swap before funding.
+The coordinator-fee on a BTC claim is **pinned at join time** (never re-read from the live view, capped
+at ≤5% of the swap, ≥10k sats), and the counterparty's revealed preimage is validated against `H` before
+the bot signs the claim. Fulfillments retry transient fetch/wallet errors in-process (5 attempts) so a
+blip never strands a funded swap, and the keystore keeps everything resumable across restarts.
+
 ## Swap-key safety (crash recovery)
 The bot signs with ephemeral per-swap keys. Held only in memory they'd die with the process — stranding
 the QBT it locked (no refund key), the BTC it's owed (no claim key), and on the Alice side the preimage
@@ -116,7 +128,9 @@ node run.js --bid-usd 0.11 --ask-usd 0.13 --size 50
 ```
 
 `--bid-usd/--ask-usd` quote in **USD per QBT** — the unit people actually think in — converted via the
-live BTCUSD rate and **re-priced on an interval so your dollar price follows BTC**. Prefer raw
+live BTCUSD rate and **re-priced on an interval so your dollar price follows BTC**. Each repricing step
+is bounded (`USDPCT_MAX_DEVIATION`, default 30% from the previous quote) so a wrong-but-up feed can't
+swing the book in one tick. Prefer raw
 `--bid/--ask` only if you really mean BTC per QBT (mind the magnitude: QBT ≈ $0.12 is ≈ 0.0000010
 BTC/QBT). `--size` is QBT per side (a ceiling — inventory sizing trims it live). Quote one side only by
 passing just one. All flags have env twins (see `run.js`'s header).

@@ -18,6 +18,10 @@ import {
 const rand = (n) => globalThis.crypto.getRandomValues(new Uint8Array(n));
 
 export class SwapClient {
+  // ── role / pin ────────────────────────────────────────────────────────────────────────────────
+  // The first time a fee-bearing view arrives (create/join/enter, before the app shows its own
+  // breakdown) we capture it; afterwards every build uses the PINNED fee, never a drifted view value.
+  #pinFee(v) { if (v?.fee && !this._pinnedFee) this._pinnedFee = { sats: v.fee.sats || 0, address: v.fee.address || null, bps: v.fee.bps || 0 }; return this._pinnedFee; }
   constructor({ coordinator, onUpdate = () => {}, feeSats = { qbit: 100000, btc: 5000 }, btcHrp = "bc", qbitHrp = "qb", chains = null }) {
     this.base = coordinator.replace(/\/$/, "");
     this.onUpdate = onUpdate;
@@ -98,7 +102,8 @@ export class SwapClient {
     await this.#freshKeys(role === "alice");
     const { id, tokens } = await this.#api("/swaps", { method: "POST", body: { btcSats, qbtSats, securityLevel } });
     this.id = id; this.token = tokens[role];
-    await this.#submit();
+    const v = await this.#submit();
+    this._pinnedFee = v.fee || null;   // pin the agreed fee (if any) at agreement time
     const inviteToken = tokens[role === "alice" ? "bob" : "alice"];
     return { id, myToken: this.token, inviteToken, inviteLink: this.link(inviteToken) };
   }
@@ -111,6 +116,7 @@ export class SwapClient {
     if (pre.chains) this.chains = pre.chains;   // the swap view is authoritative for the pair's identity
     await this.#freshKeys(this.role === "alice");
     const v = await this.#submit();
+    this._pinnedFee = v.fee || null;   // pin the agreed fee at join
     this.terms = { btcSats: v.terms?.btcSats, qbtSats: v.terms?.qbtSats };
     return { id, role: this.role, direction: this.direction };
   }
@@ -119,6 +125,7 @@ export class SwapClient {
     this.role = role; this.direction = direction; this.id = id; this.token = token; this.btcDest = btcDest; this.qbitDest = qbitDest;
     await this.#freshKeys(role === "alice");
     const v = await this.#submit();
+    this._pinnedFee = v.fee || null;
     this.terms = { btcSats: v.terms?.btcSats, qbtSats: v.terms?.qbtSats };
     return { id };
   }
@@ -312,7 +319,14 @@ export class SwapClient {
   // Live claim/refund the party signs itself: size the BTC fee at mempool's High-priority tier
   // (v.feerates.fastestFee) so it confirms promptly — the pre-signed fee ladder is only the fallback
   // the watchtower uses when this party is OFFLINE. Never let the fee eat the output below dust.
-  #liveFee(v, leg, kind) { const amt = (v.funding?.[leg] || v.shortFunded?.[leg])?.amountSats || 0; return Math.min(dynFee(leg, kind, v.feerates, feeVbytes(v, leg, kind)), amt - DUST); }
+  #liveFee(v, leg, kind) {
+    const amt = (v.funding?.[leg] || v.shortFunded?.[leg])?.amountSats || 0;
+    // Hard cap the dynamic fee: even if the coordinator's view is compromised, a claim/refund never
+    // pays more than this (per tx), and never eats the output below dust. Bounds the "drain to ~0"
+    // theft vector while still tracking live conditions.
+    const MAX_FEE_SATS = Math.max(10000, Math.floor(amt * 0.05));   // ≤ 5% of the funded amount, ≥10k
+    return Math.max(1, Math.min(dynFee(leg, kind, v.feerates, feeVbytes(v, leg, kind)), Math.min(MAX_FEE_SATS, amt - DUST)));
+  }
   async #claim(v, leg, preimage) { return this.#send(leg, "claim", await this.#build(v, leg, "claim", preimage, this.#liveFee(v, leg, "claim"))); }
   async #refund(v, leg) { return this.#send(leg, "refund", await this.#build(v, leg, "refund", new Uint8Array(0), this.#liveFee(v, leg, "refund"))); }
 
@@ -347,15 +361,15 @@ export class SwapClient {
   async #buildP2wsh(v, leg, kind, preimage, feeSats) {
     const f = v.funding[leg] || v.shortFunded?.[leg], ws = bin(v.htlc[leg].witnessScript), destSpk = addressToScriptPubKey(this.#destOf(leg));   // shortFunded → refund an underfunded deposit
     const branch = kind === "refund" ? "refund" : "claim";
-    // Coordinator fee: on a successful BTC-SLOT claim, add a second output paying the coordinator's fee
-    // address (the fee always rides the btc slot). The buyer funded it on top of the swap amount, so the
-    // seller still nets the full swap amount; the claim's own network fee (feeSats) is taken out of the
-    // fee output. No fee on refunds; dropped if it would be dust.
-    let extraOut = null, outVal = f.amountSats - feeSats;   // no coordinator fee → the claimer pays the network fee from its own amount
-    if (leg === "btc" && branch === "claim" && v.fee?.sats > 0 && v.fee.address) {
-      const split = btcClaimSplit(f.amountSats, feeSats, v.fee.sats);   // seller stays whole; network fee capped at the reserve
+    // Coordinator fee: PIN it at create/join and never re-read from the view. Without the pin, a
+    // coordinator can inflate fee.sats at claim time and drain the seller's proceeds into its own fee
+    // address (the client auto-signs it). With the pin, only the agreed fee can ever be signed.
+    const pinned = this._pinnedFee || v.fee;
+    let extraOut = null, outVal = f.amountSats - feeSats;
+    if (leg === "btc" && branch === "claim" && pinned?.sats > 0 && pinned.address) {
+      const split = btcClaimSplit(f.amountSats, feeSats, pinned.sats);   // seller stays whole; network fee capped at the reserve
       outVal = split.outVal;
-      if (split.feeOut != null) extraOut = { spk: addressToScriptPubKey(v.fee.address), value: split.feeOut };
+      if (split.feeOut != null) extraOut = { spk: addressToScriptPubKey(pinned.address), value: split.feeOut };
     }
     // Fork replay protection: on a flagged leg every sweep carries the >83-byte OP_RETURN marker (the
     // coordinator refuses marker-less sweeps there; BIP-110 policy keeps the tx off the fork chain).
@@ -375,15 +389,17 @@ const DUST = 546;
 export function btcClaimSplit(funding, netFee, feeTotal) {
   const outVal = funding - feeTotal;                                       // seller's agreed amount, always
   const feeOut = feeTotal - Math.min(Math.max(0, netFee), feeTotal);       // platform remainder after the capped network fee
-  return { outVal, feeOut: feeOut > DUST ? feeOut : null };
+      return { outVal, feeOut: feeOut > DUST ? feeOut : null };
 }
 // Public broadcast endpoints for the coordinator-down fallback (#send), keyed by network hrp. Both chains
 // are openly relayable, so we ship a fallback for EITHER leg: each endpoint accepts a raw tx hex as the
 // POST body and returns the txid (Esplora-style). Regtest ("bcrt"/"qbrt") has no public endpoint → empty.
 // QBT endpoints can be injected per-deploy via window.QBIT_BROADCAST_URLS = { qb: [...], tqb: [...] } so
-// they aren't pinned in-source; a hardcoded default can be added here once stable.
+// they aren't pinned in-source; a hardcoded default can be added here once stable. On the bip110 fork
+// pair the BTC fallback is the pair's own explorer (mempool.guide), not a Qbit-branded one.
+const _BTC_EXPLORER = (globalThis.QBIT_CHAINS?.btc?.explorer || "").replace(/\/tx\/?$/, "/api");
 export const BTC_BROADCAST = {
-  bc: ["https://mempool.space/api/tx", "https://blockstream.info/api/tx"],
+  bc: _BTC_EXPLORER ? [_BTC_EXPLORER + "/tx"] : ["https://mempool.space/api/tx", "https://blockstream.info/api/tx"],
   tb: ["https://mempool.space/testnet4/api/tx", "https://blockstream.info/testnet/api/tx"],
 };
 export const QBIT_BROADCAST = {

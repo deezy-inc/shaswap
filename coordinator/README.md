@@ -23,21 +23,28 @@ A separate in-process HTTP server (`startAdmin(port)`, default `8790`) that give
 view of the store — overview counts, chain heights/backends, a filterable table of every swap (state,
 amounts, funding, party presence, watchtower-armed status), the order book, and an SSE activity feed.
 It reads the live in-memory store directly (no DB polling; global `subscribeAll` drives the feed),
-exposes **no mutation endpoints**, and **redacts capability tokens**. Gated by `ADMIN_TOKEN`
-(`?token=` or `X-Admin-Token`; a random one is generated + logged if unset). `serve.js`/`trial.js` start
-it automatically unless `ADMIN=off`. It is meant to be reached over a private network (e.g. the tailnet),
-never exposed publicly — bind with `ADMIN_BIND` and keep it off any public reverse proxy.
+exposes **no mutation endpoints**, and **redacts capability tokens**. Auth hardening: the token is
+compared with `timingSafeEqual`, and repeated failures are throttled with exponential per-IP backoff.
+Gated by `ADMIN_TOKEN` (`?token=` or `X-Admin-Token`; a random one is generated if unset — it's printed
+once to the log so it can be used, and the URL isn't logged anymore). Binds **127.0.0.1 by default**
+(`ADMIN_BIND`); route to the tailnet there, never to a public reverse proxy. `serve.js`/`trial.js` start
+it automatically unless `ADMIN=off`.
 - `GET /` dashboard · `GET /api/overview` · `GET /api/swaps[?state=]` · `GET /api/swaps/:id` ·
   `GET /api/offers` · `GET /stream` (SSE)
 
 ## API (auth: `X-Swap-Token`, header or `?token=`)
-- `POST /swaps` → `{ id, tokens: { alice, bob } }` (Alice shares Bob's token as his link)
-- `POST /swaps/:id/party` — submit `{ qbitPub, btcPub, btcDest, qbitDest, H? }`
+- `POST /swaps` → `{ id, tokens: { alice, bob } }` (Alice shares Bob's token as his link). New swaps are
+  rejected with `429`-style errors once `MAX_ACTIVE_SWAPS` (default 2000) non-terminal swaps are live.
+- `POST /swaps/:id/party` — submit `{ qbitPub, btcPub, btcDest, qbitDest, H? }`. **First-come lock:**
+  once a slot is filled the pubkeys are immutable, and `H` may only be **set once** (by alice's first
+  join) — a later change is rejected rather than silently re-deriving the HTLCs.
 - `GET  /swaps/:id` — the party's view: both legs' HTLC addresses, funding (+`spent`), confs, chain
   `heights`, `state`, `refund` availability per leg, and `preimage` (only once public on-chain)
 - `GET  /swaps/:id/events` — **Server-Sent Events**: the same view pushed on every state change (the
   web app and bots subscribe instead of polling)
-- `POST /swaps/:id/broadcast` — submit `{ leg, kind, tx }` (`kind`: `claim` | `refund`) to broadcast
+- `POST /swaps/:id/broadcast` — submit `{ leg, kind, tx }` (`leg`: `btc`|`qbit`, `kind`: `claim`|`refund`)
+  to broadcast; `leg`/`kind` are validated before anything touches a chain (a bad value is a 400, never
+  a relayed tx).
 - `POST /swaps/:id/finish` — **watchtower**: submit a pre-signed `{ claim: { leg, needsPreimage, tiers:[{feerate,tx}] }, refund: { leg, tx } }` so the coordinator finishes the swap even if you go offline
 
 The watcher surfaces `refund.{qbit,btc}.available` once a funded, still-unspent leg's timelock passes,
@@ -57,6 +64,7 @@ tabs, coordinator finishes).
 
 ## Order book API (optional — `offers.js`)
 A maker/taker layer on top of the swap engine (the web app gates it behind a flag; see its README).
+Open offers expire after `OFFER_TTL_MS` (default 24h) and are swept from the book.
 - `POST /offers` — maker posts one lot `{ giveCoin, giveSats, wantCoin, wantSats }` → `{ id, makerToken }`
 - `GET  /offers` — public book: `{ asks, bids }` (QBT priced in BTC; ask = sell QBT for BTC), best price first
 - `POST /offers/:id/take` — instantiate a swap from the offer (taker = initiator) → `{ swapId, takerToken, direction, terms }`
@@ -153,8 +161,9 @@ Each chain picks a backend via `<CHAIN>_BACKEND` (falls back to `COORD_CHAIN`, t
   long) plus a `WATCH_SETTLE_GRACE_MS` grace after settling (default 24h), so it's never dropped while a
   counterparty might still be refunding. (Even if one were, funds are never at risk — the wallet is only
   for funding *detection*; parties refund with their own keys.) `WATCH_WALLET` sets the wallet name.
-- **`esplora`** — mempool.space / self-hosted electrs REST for the **BTC leg** (no Bitcoin node needed);
-  set `ESPLORA_URL` (default `https://mempool.space/api`). Indexed scripthash lookups + built-in
+- **`esplora`** — Esplora / self-hosted electrs REST for the **BTC leg** (no Bitcoin node needed);
+  set `ESPLORA_URL` (default: pair-specific — `https://mempool.space/api` for CHAIN2=qbit,
+  `https://mempool.guide/api` for CHAIN2=bip110). Indexed scripthash lookups + built-in
   rate-limit handling (`ESPLORA_MIN_INTERVAL_MS`, `ESPLORA_MAX_RETRIES`). This backend is BTC-only, so the
   QBT leg uses `dev`/`rpc` against your own `qbitd` (its data source — unrelated to how broadcastable QBT is).
 
@@ -163,8 +172,16 @@ UPSERTed per change so `touch()` is O(1), not a full-file rewrite; the swap is a
 with JSON1: `SELECT id FROM swaps WHERE json_extract(data,'$.state')='COMPLETE'`. A `.json` path uses the
 legacy atomic-snapshot backend instead; a fresh `.db` next to an existing `.json` imports it on first
 boot. Default: in-memory, no persistence. `persistence` in `/api/overview` shows the active backend.) ·
-`RATE_MAX=120`
-(per-IP writes/min) · `DEV_CONFS_CAP` (cap the reorg-safe conf gate on hashrate-less regtest).
+`RATE_MAX=120` (per-IP writes/min; the real client IP is read from `CF-Connecting-IP`/`X-Forwarded-For`
+when the peer is a trusted proxy — `TRUST_PROXY`, default `127.0.0.1`) · `MAX_ACTIVE_SWAPS=2000`
+(cap on non-terminal in-memory swaps) · `OFFER_TTL_MS=86400000` (order-book offer expiry) ·
+`CHECK_NODE_CHAIN=off` to skip the boot-time chain-vs-HRP assertion · `DEV_CONFS_CAP` (cap the
+reorg-safe conf gate on hashrate-less regtest).
+
+For `reorgModel: "fixed"` (e.g. the bip110 fork) the confirmation depth is **value-scaled**: the base
+`fixedConfs` applies at `fixedScaleBtc` BTC of swap value (default 1 conf at 0.01 BTC on the bip110
+preset), and every doubling of value adds one conf up to `fixedMaxConfs` (12). So a small swap settles
+at 1 conf (no 12-block wait) while a large one gets a deep burial.
 
 ### HTLC addresses + timelocks (set these for the deploy network)
 - `BTC_HRP` / `QBIT_HRP` — hrp for the HTLC **deposit addresses** the coordinator hands out. Must match

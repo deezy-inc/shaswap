@@ -28,6 +28,7 @@ export const usdToBtcQbt = (usdPerQbt, btcUsdRate) => usdPerQbt / btcUsdRate;
 // ping). On a stale/unavailable feed the prices are left as-is and the error is surfaced once.
 export function startUsdRepricer({ quote, pegs, intervalMs = Number(process.env.REPRICE_MS || 120_000), log = console.log, fetchImpl = fetch }) {
   let lastErr = "";
+  const MAX_DEVIATION = Number(process.env.USDPCT_MAX_DEVIATION || 30);   // %: refuse steps bigger than this off the previous quote
   const tick = async () => {
     if (pegs.bid == null && pegs.ask == null) return;
     try {
@@ -36,9 +37,19 @@ export function startUsdRepricer({ quote, pegs, intervalMs = Number(process.env.
         if (pegs[side] == null) continue;
         const price = usdToBtcQbt(pegs[side], rate);
         const size = quote[side]?.qbtSats ?? quote[side === "bid" ? "ask" : "bid"]?.qbtSats ?? 50e8;
+        const prev = quote[side]?.price;
+        // Bounded step: never move more than MAX_DEVIATION% in one tick, so a bad/ compromised feed
+        // can't swing the book in a single bound (the previous price persists until the next tick).
+        if (prev > 0) {
+          const dev = Math.abs(price - prev) / prev * 100;
+          if (dev > MAX_DEVIATION) {
+            if (lastErr !== "dev") { log(`[usd] ${side} move ${dev.toFixed(0)}% > cap ${MAX_DEVIATION}% — holding ${prev}`); lastErr = "dev"; }
+            continue;
+          }
+        }
         if (quote[side]?.price !== price) quote[side] = { price, qbtSats: size };
+        lastErr = "";
       }
-      lastErr = "";
     } catch (e) { if (e.message !== lastErr) { lastErr = e.message; log(`[usd] ${e.message} — holding last prices`); } }
   };
   const timer = setInterval(tick, intervalMs);

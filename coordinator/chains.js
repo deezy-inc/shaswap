@@ -22,7 +22,12 @@
 //   minConfs         floor on the reorg-safe confirmation gate
 //   script           HTLC family: "p2wsh-ecdsa" (Bitcoin-family) | "p2mr-slhdsa" (qbit)
 //   reorgModel       value-scaled gate pricing: "btc-subsidy" | "conftarget-rpc" | "fixed"
-//   fixedConfs       confs used when reorgModel="fixed"
+//   fixedConfs       reorg depth for reorgModel="fixed" — scaled by swap value:
+//                    the base depth applies at `fixedScaleBtc` BTC of swap value; every additional
+//                    doubling of value adds one conf (1 conf at ≤scale, 2 at 2×, 3 at 4×, … capped at
+//                    fixedMaxConfs). So a small swap settles fast while a large one gets a deep burial.
+//   fixedScaleBtc    swap value (in whole BTC) at which the base fixedConfs applies
+//   fixedMaxConfs    hard ceiling on the scaled fixed-confs depth
 //   trustUnconfirmed treat a 0-conf (mempool) deposit on THIS leg as final: the claimable gate, the
 //                    sequenced-funding gate, and the broadcast hold-gate all pass at 0-conf. UNSAFE
 //                    against an adversarial counterparty (RBF/double-spend) — for trusted settings
@@ -47,10 +52,15 @@ export const REORG_MODELS = ["btc-subsidy", "conftarget-rpc", "fixed"];
 // A preset names BOTH sides: on a fork pair, plain "BTC" is ambiguous — the pair is displayed as
 // BTC-SHA256 ⇄ BTC-Blake2b so users always know which chain of the fork they're on.
 const CHAIN2_PRESETS = {
-  qbit:   { label: "QBT",         btcLabel: "BTC",        hrp: "qbrt", blockSecs: 60,  minSats: 200000, minConfs: 1, script: "p2mr-slhdsa", reorgModel: "conftarget-rpc", fixedConfs: 6,  btcReplay: false, forkTwin: false },
-  bip110: { label: "BTC-Blake2b", btcLabel: "BTC-SHA256", hrp: "bc",   blockSecs: 600, minSats: 50000,  minConfs: 1, script: "p2wsh-ecdsa", reorgModel: "fixed",          fixedConfs: 12, btcReplay: true,  forkTwin: true },
+  qbit:   { label: "QBT",         btcLabel: "BTC",        hrp: "qbrt", blockSecs: 60,  minSats: 200000, minConfs: 1, script: "p2mr-slhdsa", reorgModel: "conftarget-rpc", fixedConfs: 6,  btcReplay: false, forkTwin: false, esplora: "https://mempool.space/api",  btcExplorer: "https://mempool.space/tx/",          qbitExplorer: "https://qbitmempool.robertclarke.com/tx/" },
+  bip110: { label: "BTC-Blake2b", btcLabel: "BTC-SHA256", hrp: "bc",   blockSecs: 600, minSats: 50000,  minConfs: 1, script: "p2wsh-ecdsa", reorgModel: "fixed",          fixedConfs: 1, fixedScaleBtc: 0.01, fixedMaxConfs: 12, btcReplay: true,  forkTwin: true,  esplora: "https://mempool.guide/api", btcExplorer: "https://mempool.guide/tx/",       qbitExplorer: "https://mempool.guide/tx/" },
 };
 export const chain2Preset = () => env("CHAIN2", "qbit");
+// The pair's default BTC-side Esplora endpoint (fees + the optional esplora chain backend). The qbit
+// pair points at mempool.space; the bip110 fork deployment (shaswap.com) keeps its own dedicated
+// Esplora instance at mempool.guide — so a CHAIN2=bip110 deployer never accidentally reads prices or
+// funding from an unrelated Qbit service. Env override (ESPLORA_URL / MEMPOOL_URL) always wins.
+export const pairEsploraUrl = () => env("ESPLORA_URL", CHAIN2_PRESETS[chain2Preset()]?.esplora || "https://mempool.space/api");
 // Fork pairs share pre-fork history + tx format, so an UNPROTECTED deposit can be replayed onto the
 // other chain — an identical "twin" UTXO at the same outpoint, paying the same HTLC script. When this
 // flag is on, clients pre-sign a refund-path sweep of that twin (valid on the OTHER chain) and the
@@ -83,6 +93,8 @@ export function chainCfg(leg) {
     script: alt("SCRIPT", "QBIT_SCRIPT", p.script),
     reorgModel: alt("REORG_MODEL", "QBIT_REORG_MODEL", p.reorgModel),
     fixedConfs: Number(alt("FIXED_CONFS", "QBIT_FIXED_CONFS", p.fixedConfs)),
+    fixedScaleBtc: Number(alt("FIXED_SCALE_BTC", "QBIT_FIXED_SCALE_BTC", p.fixedScaleBtc ?? 0.01)),
+    fixedMaxConfs: Number(alt("FIXED_MAX_CONFS", "QBIT_FIXED_MAX_CONFS", p.fixedMaxConfs ?? 12)),
     trustUnconfirmed: flag("ALT_TRUST_UNCONFIRMED") || flag("QBIT_TRUST_UNCONFIRMED"),
     replayOpReturn: flag("ALT_REPLAY_OPRETURN") || flag("QBIT_REPLAY_OPRETURN"),
   };
@@ -90,7 +102,9 @@ export function chainCfg(leg) {
 // The public projection clients configure themselves from (GET /chains, serve.js injection, view).
 export const publicChains = () => Object.fromEntries(["btc", "qbit"].map((leg) => {
   const { label, hrp, blockSecs, minSats, script, trustUnconfirmed, replayOpReturn } = chainCfg(leg);
-  return [leg, { label, hrp, blockSecs, minSats, script, trustUnconfirmed, replayOpReturn, forkTwin: forkTwinPair() }];
+  const p = CHAIN2_PRESETS[chain2Preset()];
+  return [leg, { label, hrp, blockSecs, minSats, script, trustUnconfirmed, replayOpReturn, forkTwin: forkTwinPair(),
+    explorer: env(`${leg.toUpperCase()}_EXPLORER`, leg === "btc" ? p.btcExplorer : p.qbitExplorer) }];
 }));
 
 // Validate once at startup — catch a typo'd preset/script/model before any swap derives from it.

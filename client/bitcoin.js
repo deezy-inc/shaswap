@@ -2,7 +2,7 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { hmac } from "@noble/hashes/hmac.js";
 import * as secp from "@noble/secp256k1";
-import { concatBytes, u8, leU, compactSize, pushData, scriptNum } from "./encoding.js";
+import { concatBytes, u8, leU, compactSize, pushData, scriptNum, checkLocktime } from "./encoding.js";
 import { segwitAddr } from "./p2mr.js";
 
 // noble/secp256k1 v2 needs its hash primitives provided.
@@ -29,16 +29,22 @@ export function ecdsaSign(privBytes, digest32) {       // low-S DER + SIGHASH_AL
 // OP_SIZE 32 OP_EQUALVERIFY pins the preimage length to 32 bytes so the same secret satisfies both
 // legs' hashlocks identically (defense against a differently-sized preimage across chains).
 export function htlcWitnessScript(hashH, claimPub, refundPub, locktime) {
+  if (hashH.length !== 32 || claimPub.length !== 33 || refundPub.length !== 33) throw new Error("bad key/hash length");
+  checkLocktime(locktime);
   return concatBytes(
     u8(OP.IF, OP.SIZE), pushData(scriptNum(32)), u8(OP.EQUALVERIFY),
     u8(OP.SHA256), pushData(hashH), u8(OP.EQUALVERIFY), pushData(claimPub), u8(OP.CHECKSIG),
     u8(OP.ELSE), pushData(scriptNum(locktime)), u8(OP.CLTV, OP.DROP), pushData(refundPub), u8(OP.CHECKSIG), u8(OP.ENDIF));
 }
+// A CLTV operand is a block HEIGHT in this protocol — shared validator lives in encoding.js
+// (re-exported here so existing bitcoin.js callers keep working).
+export { checkLocktime } from "./encoding.js";
 export const p2wshSpk = (ws) => concatBytes(u8(0x00, 0x20), sha256(ws));
 export const p2wshAddr = (ws, hrp = "bcrt") => segwitAddr(hrp, 0, sha256(ws));
 
 // vin: [{txidLE, vout, sequence}], vout: [{value, spk}]
 export function bip143Sighash({ version, vin, vout, inputIndex, scriptCode, amount, locktime, hashType = 1 }) {
+  if (hashType !== 1) throw new Error(`unsupported sighash type ${hashType} (only SIGHASH_ALL is implemented)`);
   const hashPrevouts = dsha(concatBytes(...vin.map((i) => concatBytes(i.txidLE, leU(i.vout, 4)))));
   const hashSequence = dsha(concatBytes(...vin.map((i) => leU(i.sequence, 4))));
   const hashOutputs = dsha(concatBytes(...vout.map((o) => concatBytes(leU(o.value, 8), compactSize(o.spk.length), o.spk))));
@@ -73,15 +79,29 @@ export function replayMarkerSpk() {
 // Build a signed P2WSH HTLC spend. branch: "claim" (needs preimage) or "refund" (after CLTV).
 // `replay: true` appends the zero-value replay marker output (signed with the rest, so it can't be
 // stripped without invalidating the signature — required by the coordinator on replay-protected legs).
+// This is the LAST fail-closed point before a signature exists: validate the economics, because
+// callers may be building from coordinator-reported (hostile) data.
 export function btcSpend({ prevTxidLE, vout, amount, ws, priv, destSpk, outVal, branch, preimage, locktime = 0, extraOut = null, replay = false }) {
+  if (branch !== "claim" && branch !== "refund") throw new Error(`bad branch "${branch}"`);
+  if (branch === "claim" && preimage.length !== 32) throw new Error(`claim preimage must be 32 bytes (got ${preimage.length})`);
+  if (branch === "refund") checkLocktime(locktime);
+  amount = BigInt(amount); outVal = BigInt(outVal);
+  if (amount <= 0n) throw new Error(`bad input amount ${amount}`);
+  if (outVal <= 0n || outVal > amount) throw new Error(`bad outVal ${outVal} against input ${amount} (fee would eat the output)`);
+  if (prevTxidLE.length !== 32) throw new Error("prevTxidLE must be 32 bytes");
+  if (!Number.isSafeInteger(vout) || vout < 0) throw new Error(`bad vout ${vout}`);
   const seq = branch === "refund" ? 0xfffffffe : 0xffffffff;
   const vin = [{ txidLE: prevTxidLE, vout, sequence: seq }];
-  const outs = [{ value: BigInt(outVal), spk: destSpk }];
+  const outs = [{ value: outVal, spk: destSpk }];
   // Optional second output — the coordinator fee, on a successful claim. It's inside the signed set of
   // outputs (the sighash below covers `outs`), so it can't be altered without re-signing.
-  if (extraOut) outs.push({ value: BigInt(extraOut.value), spk: extraOut.spk });
+  if (extraOut) {
+    const ev = BigInt(extraOut.value);
+    if (ev <= 0n || outVal + ev > amount) throw new Error(`bad extraOut value ${ev} (outputs exceed the input)`);
+    outs.push({ value: ev, spk: extraOut.spk });
+  }
   if (replay) outs.push({ value: 0n, spk: replayMarkerSpk() });
-  const sig = ecdsaSign(priv, bip143Sighash({ version: 2, vin, vout: outs, inputIndex: 0, scriptCode: ws, amount: BigInt(amount), locktime }));
+  const sig = ecdsaSign(priv, bip143Sighash({ version: 2, vin, vout: outs, inputIndex: 0, scriptCode: ws, amount, locktime }));
   const witness = branch === "claim" ? [sig, preimage, u8(0x01), ws] : [sig, new Uint8Array(0), ws];
   return serializeSegwit(2, vin, outs, [witness], locktime);
 }

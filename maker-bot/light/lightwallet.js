@@ -19,6 +19,9 @@ import { btcKey, qbitKey } from "./hd.js";
 const { concatBytes } = encoding;
 
 const MAX_CHAIN = Number(process.env.LIGHT_MAX_CHAIN || 20);
+// Hard cap on the feerate (sat/vB) used for funding, so a compromised/garbage fee oracle can't drain
+// the wallet into miner fees. Mirrors wallets.js's MAKER_MAX_FEERATE on the Core-RPC path.
+const LIGHT_MAX_FEERATE = Number(process.env.LIGHT_MAX_FEERATE || 500);
 // vsize models: P2WPKH ~68 vB/input, 31/output, 11 overhead. Qbit p2mr pk-spends carry a ~3.6 kB
 // SLH-DSA signature with NO witness discount — measured ≈3.9-4.2 kvB per input; be generous.
 const BTC_VB = { in: 68, out: 31, base: 11 };
@@ -70,8 +73,8 @@ export async function lightWallet({ seed, btcApi = "https://mempool.space/api", 
   }
   const spendableSet = (us) => us.filter((u) => u.confirmed || u.depth < MAX_CHAIN);
 
-  async function btcRate() { try { const f = await (await B("/v1/fees/recommended")).json(); return Math.max(1, Math.ceil(f.fastestFee || 1)); } catch { return Number(process.env.LIGHT_BTC_FEERATE || 2); } }
-  async function qbtRate() { try { const f = await (await Q("/v1/fees/recommended")).json(); return Math.max(1, Math.ceil(f.fastestFee || 1)); } catch { return Number(process.env.LIGHT_QBIT_FEERATE || 1); } }
+  async function btcRate() { try { const f = await (await B("/v1/fees/recommended")).json(); return Math.min(LIGHT_MAX_FEERATE, Math.max(1, Math.ceil(f.fastestFee || 1))); } catch { return Number(process.env.LIGHT_BTC_FEERATE || 2); } }
+  async function qbtRate() { try { const f = await (await Q("/v1/fees/recommended")).json(); return Math.min(LIGHT_MAX_FEERATE, Math.max(1, Math.ceil(f.fastestFee || 1))); } catch { return Number(process.env.LIGHT_QBIT_FEERATE || 1); } }
 
   // Ancestor deficit for a candidate input set at `rate`: every unconfirmed ancestor's shortfall from
   // the target rate (per-tx floor at 0 — a rich ancestor doesn't subsidize a poor one; ≥ package-exact,

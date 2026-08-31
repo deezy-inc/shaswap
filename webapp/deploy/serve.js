@@ -14,7 +14,7 @@ import http from "node:http";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { dirname, join, extname } from "node:path";
+import { dirname, join, extname, sep } from "node:path";
 import { startServer } from "../../coordinator/server.js";
 import { startAdmin } from "../../coordinator/admin.js";
 import { MIN_SATS } from "../../coordinator/swap.js";   // single source of truth for the min swap value (env-driven)
@@ -129,7 +129,7 @@ function unified() {
         // SPA fallback: "/" and any extensionless client route (/api, /info, /activity, …) serve index.html;
         // real assets (.js/.css/.wasm/…) are served by name.
         const file = join(ROOT, rel === "/" || !extname(rel) ? "/index.html" : rel);
-        if (!file.startsWith(ROOT)) { res.writeHead(403); return res.end(); }
+        if (!file.startsWith(ROOT + sep) && file !== ROOT) { res.writeHead(403); return res.end(); }
         let body = await readFile(file);
         if (file.endsWith("index.html")) {
           let html = body.toString().replace("</head>", `${CONFIG}\n</head>`);

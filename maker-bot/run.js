@@ -46,7 +46,9 @@ if (LIGHT && args.init) {
   const { newMnemonic } = await import("./light/hd.js");
   const { sealSeed, promptPassword } = await import("./light/seedstore.js");
   const mnemonic = newMnemonic();
-  console.log("\nYour seed phrase (write it down NOW — it is shown exactly once, and it IS the funds):\n");
+  // The seed is printed ONCE to stdout. Ensure nothing downstream (journald/redirect) scrubs it —
+  // this is the only copy until the user writes it down.
+  console.log("\nYour seed phrase (write it down NOW — it is shown exactly once, and it IS the funds — and will land in stdout/journald):\n");
   console.log(`    ${mnemonic}\n`);
   const p1 = await promptPassword("choose a wallet password (min 8 chars): ");
   const p2 = await promptPassword("repeat it: ");

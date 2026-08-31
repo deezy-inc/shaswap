@@ -3,12 +3,12 @@
 // Live updates over Server-Sent Events (GET /swaps/:id/events). Basic per-IP rate limiting.
 import http from "node:http";
 import { createSwap, getSwap, roleOf, submitParty, broadcast, view, poll, allSwaps, subscribe, markSeen, addConnection, dropConnection, sweepPresence, submitFinish, driveWatchtower, driveTwinSweep, cancelSwap, evictSettled, recentComplete } from "./swap.js";
-import { createOffer, getOffer, isMaker, book, takeOffer, cancelOffer, makerView } from "./offers.js";
+import { createOffer, getOffer, isMaker, book, takeOffer, cancelOffer, makerView, sweepOffers } from "./offers.js";
 import { rfqEnabled, makerByKey, submitQuote, pendingMatches, depth, bestQuote, publicQuote, takeRfq, planFill, publicPlan, takeFill, RFQ_TTL_MS } from "./rfq.js";
-import { validateChains, publicChains } from "./chains.js";
+import { validateChains, publicChains, chainCfg } from "./chains.js";
 
 validateChains();   // refuse to start on a typo'd CHAIN2 / script family / reorg model
-import { btc } from "./chain.js";
+import { btc, qbit } from "./chain.js";
 import { btcFeerates, qbitFeerates, cachedBtcFeerates, cachedQbitFeerates } from "./fees.js";
 
 const json = (res, code, body) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
@@ -20,8 +20,16 @@ const readBody = (req) => new Promise((resolve) => { let b = ""; req.on("data", 
 const PUBLIC_TRADES = process.env.PUBLIC_TRADES === "1";
 
 // ── rate limit: sliding window per IP (protects create + write endpoints) ─────
+// Real client IP: honor the forwarded header from our own same-origin proxy (loopback/tailnet),
+// fall back to the socket. Without this all users share one bucket behind the Cloudflare Tunnel.
 const WINDOW_MS = 60_000, MAX_HITS = Number(process.env.RATE_MAX || 120);
+const TRUST_PROXY = (process.env.TRUST_PROXY || "127.0.0.1").split(",").map((s) => s.trim());
 const hits = new Map();
+const realIp = (req) => {
+  const cf = req.headers["cf-connecting-ip"] || (req.headers["x-forwarded-for"] || "").split(",")[0]?.trim();
+  const via = req.socket.remoteAddress;
+  return (cf && TRUST_PROXY.includes(via)) ? cf : via;
+};
 function rateLimited(ip) {
   const now = Date.now(), arr = (hits.get(ip) || []).filter((t) => now - t < WINDOW_MS);
   arr.push(now); hits.set(ip, arr);
@@ -42,7 +50,6 @@ async function handle(req, res) {
   const url = new URL(req.url, "http://x");
   const parts = url.pathname.split("/").filter(Boolean);   // ["swaps", id, action?]
   const method = req.method;
-  const ip = req.socket.remoteAddress || "?";
   // CORS: the browser app is served from a different origin than the coordinator.
   res.setHeader("access-control-allow-origin", req.headers.origin || "*");
   res.setHeader("access-control-allow-headers", "content-type, x-swap-token");
@@ -72,7 +79,7 @@ async function handle(req, res) {
         .map((s) => ({ direction: s.terms.direction, btcSats: s.terms.btcSats, qbtSats: s.terms.qbtSats, price: s.terms.btcSats / s.terms.qbtSats, settledAt: s.settledAt || null }));
       return json(res, 200, trades);
     }
-    if (method !== "GET" && rateLimited(ip)) return json(res, 429, { error: "rate limited" });
+    if (method !== "GET" && rateLimited(realIp(req))) return json(res, 429, { error: "rate limited" });
 
     if (method === "POST" && url.pathname === "/swaps") {
       const b = await readBody(req);
@@ -155,6 +162,7 @@ async function handle(req, res) {
 
 let watching = false;
 async function watchTick() {
+  sweepOffers();
   for (const s of allSwaps()) {
     try { await poll(s); } catch { /* transient chain error */ }
     try { await driveWatchtower(s); } catch { /* transient */ }
@@ -181,7 +189,10 @@ async function cleanupWatch() {
   try { await btc.pruneWatch(keep); } catch { /* node transient */ }
 }
 
-export function startServer(port = 8787) {
+export async function startServer(port = 8787) {
+  // Startup chain-vs-HRP assertion: refuse to begin if the node's chain doesn't match the configured
+  // HRP — otherwise the coordinator derives addresses nobody on the chain can ever spend.
+  if (process.env.CHECK_NODE_CHAIN !== "off") await assertNodeChains();
   const server = http.createServer(handle);
   return new Promise((resolve) => server.listen(port, () => {
     if (!watching) {
@@ -197,6 +208,22 @@ export function startServer(port = 8787) {
     }
     resolve(server);
   }));
+}
+
+// Best-effort boot-time check: the node's reported chain must match the HRP the coordinator derives
+// (BTC_HRP/ALT_HRP). Skipped by CHECK_NODE_CHAIN=off (e.g. esplora backend, where the node's chain is
+// irrelevant to address derivation). Warn, never throw — the operator's own labels may legitimately
+// differ; this is a footgun-catcher, not a gate.
+async function assertNodeChains() {
+  const NET_OF_HRP = { bc: "mainnet", tb: "testnet", sb: "signet", bcrt: "regtest", qb: "mainnet", tqb: "testnet", qbrt: "regtest" };
+  for (const [cfg, chain] of [["btc", btc], ["qbit", qbit]]) {
+    try {
+      const want = NET_OF_HRP[chainCfg(cfg).hrp];
+      if (!want) continue;
+      const info = await chain.rpc("getblockchaininfo");
+      if (info.chain && info.chain !== want) console.error(`[chains] ⚠ ${cfg} node reports chain="${info.chain}" but configured hrp implies "${want}" — derived HTLC addresses may be unspendable`);
+    } catch { /* node not reachable / not a Core chain — nothing to assert */ }
+  }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) startServer(Number(process.env.PORT) || 8787).then((s) => console.log("coordinator on", s.address()));

@@ -67,19 +67,44 @@ const BTC_HRPS = ["bcrt", "bc", "tb", "sb"];
 const QBIT_HRPS = ["qbrt", "qbt", "tqb", "qb"];
 export function addressCoin(addr) {
   const l = (addr || "").trim().toLowerCase();
-  for (const h of QBIT_HRPS) if (l.startsWith(h + "1")) return "qbit";
-  for (const h of BTC_HRPS) if (l.startsWith(h + "1")) return "btc";
+  for (const h of QBIT_HRPS) if (l.startsWith(h + "1")) { try { decodeBech32(l); return "qbit"; } catch { return null; } }
+  for (const h of BTC_HRPS) if (l.startsWith(h + "1")) { try { decodeBech32(l); return "btc"; } catch { return null; } }
   if (/^[1235mn]/.test((addr || "").trim())) { try { addressToScriptPubKey(addr.trim()); return "btc"; } catch { /* not base58 */ } }   // btc legacy
   return null;
 }
+// The coin an address's HRP maps to ("btc" | "qbit"), or null if unknown — split out from decode so
+// addressToScriptPubKey can ENFORCE the network instead of silently cross-encoding (see below).
+export function addressHrpCoin(addr) {
+  const l = (addr || "").trim().toLowerCase();
+  const sep = l.lastIndexOf("1");
+  if (sep < 1) return null;
+  const hrp = l.slice(0, sep);
+  if (QBIT_HRPS.includes(hrp)) return "qbit";
+  if (BTC_HRPS.includes(hrp)) return "btc";
+  return null;
+}
 
-export function addressToScriptPubKey(addr) {
+export function addressToScriptPubKey(addr, { coin } = {}) {
+  // HRP confusion guard: an optional expected "btc"|"qbit". Without it the decoder HAPPILY turns a
+  // qbit/bech32m address into a raw witness spk — e.g. a qbrt1… (witness v2) used as a BTC destination
+  // yields an undefined-witness-version program, which on Bitcoin is ANYONE-CAN-SPEND. Callers that
+  // know the target chain (webapp, maker-bot) pass `coin` and get a hard failure on a mismatch.
   let bechErr;
-  try { const { witver, program } = decodeBech32(addr); return witnessSpk(witver, program); }
-  catch (e) { bechErr = e; }
+  try {
+    const { hrp, witver, program } = decodeBech32(addr);
+    if (coin) {
+      if (coin === "btc" && !BTC_HRPS.includes(hrp)) throw new Error(`address hrp "${hrp}" is not a Bitcoin network`);
+      if (coin === "qbit" && !QBIT_HRPS.includes(hrp)) throw new Error(`address hrp "${hrp}" is not a Qbit network`);
+    }
+    return witnessSpk(witver, program);
+  } catch (e) {
+    bechErr = e;
+    if (coin && (coin === "btc" ? BTC_HRPS : QBIT_HRPS).length) throw e;   // hrp mismatch → fail fast with the real reason
+  }
   try {
     const { version, hash } = decodeBase58Check(addr);
     if (hash.length !== 20) throw new Error("bad legacy hash length");
+    if (coin === "qbit") throw new Error("base58 legacy is not a Qbit address format");
     if (P2PKH.has(version)) return concatBytes(u8(0x76, 0xa9, 0x14), hash, u8(0x88, 0xac));  // OP_DUP HASH160 <20> EQUALVERIFY CHECKSIG
     if (P2SH.has(version)) return concatBytes(u8(0xa9, 0x14), hash, u8(0x87));                // HASH160 <20> EQUAL
     throw new Error(`unrecognized version 0x${version.toString(16)}`);

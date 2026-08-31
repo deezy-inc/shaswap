@@ -99,5 +99,9 @@ Set the coordinator URL in the create form (or `window.QBIT_COORDINATOR`).
   apply to a coordinator bug — those are caught by the HTLC self-verification above. Closing it fully
   would need an out-of-band SAS/fingerprint the two parties compare before funding (à la Signal safety
   numbers). Not implemented.
+- **Fee economics are pinned at agreement time.** The coordinator-supplied fee (`fee.sats`/`fee.address`)
+  is captured once at create/join and never re-read from the live view, so a compromised coordinator can't
+  inflate it at claim time to drain a claim output. The network fee for live claims/refunds is additionally
+  hard-capped (≤5% of the funded amount, ≥10k sats) as a defense-in-depth bound.
 - **Timelocks** are currently `+20/+40` blocks; before mainnet they must be tuned in wall-clock per chain
   (BTC ~10 min vs QBT ~60 s blocks) so the claim window survives a fee spike + a few RBF rounds.

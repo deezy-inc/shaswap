@@ -6,6 +6,7 @@ export const u8 = (...xs) => Uint8Array.from(xs);
 
 export function leU(n, bytes) {           // little-endian encode a (BigInt|number) into `bytes`
   n = BigInt(n);
+  if (n < 0n || n >= (1n << BigInt(8 * bytes))) throw new RangeError(`leU: ${n} out of range for ${bytes} bytes`);   // never silently wrap a value into a signed tx
   const out = new Uint8Array(bytes);
   for (let i = 0; i < bytes; i++) { out[i] = Number(n & 0xffn); n >>= 8n; }
   return out;
@@ -35,4 +36,12 @@ export function scriptNum(n) {            // minimal CScriptNum (for CLTV operan
   if (out[out.length - 1] & 0x80) out.push(neg ? 0x80 : 0x00);
   else if (neg) out[out.length - 1] |= 0x80;
   return Uint8Array.from(out);
+}
+
+// A CLTV operand is a block HEIGHT in this protocol: 0 would make the HTLC instantly refundable
+// (watchtower refunds race the claim), a negative one fails OP_CLTV at spend time (BIP-65) and bricks
+// the refund path forever, and ≥500000000 switches CLTV to timestamp semantics. Fail closed.
+export function checkLocktime(locktime) {
+  if (!Number.isSafeInteger(locktime) || locktime <= 0 || locktime >= 500000000)
+    throw new Error(`bad HTLC locktime ${locktime} (must be a block height, 1..499999999)`);
 }

@@ -36,7 +36,7 @@ const now = Date.now();
 
 const short = (id) => (id || "").slice(0, 10);
 let LBL = { btc: "BTC", qbit: "QBT" };   // pair display tickers — refreshed from the overview each run (CHAIN2-aware)
-const fmtAmt = (s) => `${(s.btcSats || 0) / 1e8} ${LBL.btc} ⇄ ${(s.qbtSats || 0) / 1e8} ${LBL.qbit}`;
+const fmtAmt = (s) => `${(s.btcSats || 0) / 1e8} ${escHtml(LBL.btc)} ⇄ ${(s.qbtSats || 0) / 1e8} ${escHtml(LBL.qbit)}`;
 const mins = (ms) => Math.round(ms / 60000);
 const stEmoji = (st) => ({ CREATED: "🆕", READY: "🤝", FROM_FUNDED: "💰", TO_FUNDED: "💰", MATURING: "⏳", CLAIMABLE: "🔓", CLAIMED: "🔑", COMPLETE: "✅", REFUNDED: "↩️", CANCELED: "🚫", ABORTED: "⚠️" }[st] || "🔄");
 // Percent-used of the root filesystem on `host` (null = local): parse `df -P /`'s Capacity column. For a
@@ -60,6 +60,8 @@ async function tg(text) {
     if (!r.ok) console.error("telegram send failed", r.status, await r.text().catch(() => ""));
   } catch (e) { console.error("telegram error", e.message); }
 }
+// Coordinator-supplied strings (error messages, chain labels) are untrusted — escape before HTML mode.
+const escHtml = (s) => String(s ?? "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
 const api = async (p) => {
   const r = await fetch(`${ADMIN}${p}${p.includes("?") ? "&" : "?"}token=${encodeURIComponent(TOKEN)}`, { signal: AbortSignal.timeout(15000) });
   if (!r.ok) throw new Error(`${p} → ${r.status}`);
@@ -100,7 +102,7 @@ async function main() {
   // is a genuine node problem worth an alert. Node-UNREACHABLE still alerts on both legs.
   for (const leg of ["btc", "qbit"]) {
     const c = ov.chains?.[leg];
-    if (!c?.ok) { issues.push({ key: `node-down-${leg}`, sev: "CRITICAL", msg: `⛔ ${leg.toUpperCase()} node unreachable (${c?.backend}): ${c?.error || "no height"}` }); continue; }
+    if (!c?.ok) { issues.push({ key: `node-down-${leg}`, sev: "CRITICAL", msg: `⛔ ${leg.toUpperCase()} node unreachable (${escHtml(c?.backend)}): ${escHtml(c?.error) || "no height"}` }); continue; }
     const prev = state.heights[leg], prevAt = state.heightsAt[leg] || now;
     if (leg === "qbit" && prev != null && c.height === prev && now - prevAt > STALL_MIN * 60000)
       issues.push({ key: `stall-${leg}`, sev: "CRITICAL", msg: `⛔ QBT height stuck at ${c.height} for ${mins(now - prevAt)} min` });
@@ -113,7 +115,7 @@ async function main() {
   for (const { name, host } of DISK_HOSTS) {
     let pct;
     try { pct = diskPct(host); }
-    catch (e) { issues.push({ key: `disk-check-${name}`, sev: "WARN", msg: `⚠️ Can't read disk on <b>${name}</b>: ${String(e.message || e).split("\n")[0]}` }); continue; }
+    catch (e) { issues.push({ key: `disk-check-${name}`, sev: "WARN", msg: `⚠️ Can't read disk on <b>${name}</b>: ${escHtml(String(e.message || e).split("\n")[0])}` }); continue; }
     if (pct >= DISK_CRIT_PCT) issues.push({ key: `disk-${name}`, sev: "CRITICAL", msg: `🛑 Disk <b>${pct}% full</b> on <b>${name}</b> (≥${DISK_CRIT_PCT}%) — free space NOW` });
     else if (pct >= DISK_WARN_PCT) issues.push({ key: `disk-${name}`, sev: "WARN", msg: `⚠️ Disk <b>${pct}% full</b> on <b>${name}</b> (≥${DISK_WARN_PCT}%)` });
     state.disk = { ...(state.disk || {}), [name]: pct };   // last-seen % (for the recovery message)

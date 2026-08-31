@@ -25,3 +25,12 @@ builds and signs.
   double-SHA256), not `sha256(digest)`.
 - The WASM signer is loaded via `signer.js`; in a browser build the same Emscripten module loads with
   `ENVIRONMENT=web`.
+- **Fail-closed economics (audit hardening).** The library is the last checkpoint before a signature
+  exists, so it refuses to build a bad spend: `leU` range-checks (no silent wrap), `btcSpend` requires
+  a valid branch, a 32-byte claim preimage, a sane locktime, and `0 < outVal ≤ amount` with
+  `outVal + extraOut ≤ amount` (a negative/over-funded fee output is a bug, not a signed tx);
+  `htlcWitnessScript`/`htlcLeafQbit` validate key/hash lengths and the CLTV block-height range;
+  `bip143Sighash` rejects any sighash type other than SIGHASH_ALL; `addressToScriptPubKey(addr, {coin})`
+  can enforce the intended network (an hrp mismatch fails instead of cross-encoding to an
+  anyone-can-spend output); `parseTx`/`serializeTx` fail closed on truncation, non-minimal varints, and
+  witness/vin mismatches.

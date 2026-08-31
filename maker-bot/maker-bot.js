@@ -15,6 +15,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import {
   slhDsaKeygen, slhDsaSign, compressedPub,
   p2mrSighash, serializeTx, P2MR_CONTROL_SINGLE_LEAF, btcSpend, addressToScriptPubKey,
+  htlcLeafQbit, htlcWitnessScript, p2mrSpk, p2wshSpk,
 } from "@qbit-swap/client";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -168,7 +169,14 @@ export class MakerBot {
           if (this.handling.has(m.swapId)) continue;
           this.handling.add(m.swapId);
           this.inflight.set(m.swapId, m.role === "alice" ? { btcSats: m.btcSats } : { qbtSats: m.qbtSats });   // reserve the leg we'll fund until it's funded
-          const run = m.role === "alice" ? this.fulfillAsAlice({ id: m.swapId, token: m.token }) : this.fulfill({ id: m.swapId, token: m.token });
+          // Fulfillments retry in-process so a transient fetch/wallet error never strands a funded swap.
+          const retry = (fn) => (async () => {
+            for (let attempt = 0; attempt < 5; attempt++) {
+              try { return await fn(); } catch (e) { if (attempt >= 4) throw e; await sleep(this.pollMs * (attempt + 1)); }
+            }
+          })();
+          const chosen = m.role === "alice" ? () => this.fulfillAsAlice({ id: m.swapId, token: m.token }) : () => this.fulfill({ id: m.swapId, token: m.token });
+          const run = retry(chosen);
           this.log(`[maker] RFQ match ${m.swapId.slice(0, 8)} (${m.side} ${m.qbtSats / 1e8} QBT @ ${m.price}) — fulfilling as ${m.role}`);
           this.#ev("match", m);
           run.then((r) => { this.log(`[maker] RFQ ${m.swapId.slice(0, 8)} -> ${r.outcome}`); this.#ev(r.outcome === "completed" ? "completed" : "refunded", { ...m, txid: r.txid }); })
@@ -180,7 +188,7 @@ export class MakerBot {
     }
   }
 
-  // ── order book: post asks at several lot sizes and fulfill any that get taken ──
+    // ── order book: post asks at several lot sizes and fulfill any that get taken ──
   async postAsk({ qbtSats, btcSats }) {
     const o = await this.#api("/offers", { method: "POST", body: { giveCoin: "QBT", giveSats: qbtSats, wantCoin: "BTC", wantSats: btcSats } });
     this.offers.set(o.id, { makerToken: o.makerToken, lot: { qbtSats, btcSats }, handling: false });
@@ -225,6 +233,14 @@ export class MakerBot {
   // `saved` = a keystore record from a previous run (crash recovery): reuse its keys instead of fresh
   // ones. Every step is idempotent under resume — re-joining with the SAME keys is allowed by the
   // coordinator, and funding is skipped when the leg is already funded on-chain.
+  // The fee to include on the BTC claim: PINNED at join time (so a compromised/coordinator can't
+  // inflate it), plus a hard cap on the network fee the bot itself pays. Never trust v.fee from the live
+  // view — it's how the seller's proceeds get drained.
+  #feeFor(btcSats, pinnedFee) {
+    const MAX_FEE_SATS = Math.max(10000, Math.floor(btcSats * 0.05));   // ≤5% of the swap, ≥10k
+    return { sats: Math.min(pinnedFee?.sats || 0, MAX_FEE_SATS), address: pinnedFee?.address || null };
+  }
+
   async fulfill({ id, token, saved = null }) {
     // 1) ephemeral, per-swap keys — persisted to the keystore BEFORE any action, so a crash never
     //    strands our ability to claim the BTC or refund the QBT we lock below.
@@ -251,14 +267,20 @@ export class MakerBot {
     // 3) SAFETY: never lock QBT until the taker's BTC HTLC is on-chain. This is the Tier-Nolan
     //    ordering that makes the swap non-custodial for us — if the taker never funds BTC, we simply
     //    never fund QBT and walk away with zero exposure.
-    const funded = await this.#poll(`/swaps/${id}`, token, (v) => v.funding?.btc);
+    //    We ALSO independently re-derive both HTLC scripts from our own keys + the counterparty's
+    //    pubkey + H + locktimes and confirm they match the coordinator's (same as the webapp's
+    //    verifyHtlc). Without this a corrupt/compromised coordinator can hand us an address that
+    //    isn't the agreed script, and we'd fund it.
+    const funded = await this.#poll(`/swaps/${id}`, token, (v) => v.state !== "CREATED" && v.htlc && v.funding?.btc);
+    if (!this.#verifyHtlc(funded, qbit, btcPub, "bob")) throw new Error("HTLC mismatch — coordinator-supplied scripts don't match our derived values (avoiding a theft)");
+    const pinnedFee = this.#feeFor(funded.terms.btcSats, funded.fee);   // pin BEFORE any funding
     this.log(`[maker] taker's BTC HTLC funded (${funded.funding.btc.txid.slice(0, 12)}); locking QBT`);
 
     // 4) fund our QBT leg — unless a previous run already did (resume-idempotency).
     if (!funded.funding?.qbit) {
-      const fundTxid = await this.wallet.fundQbit(ready.htlc.qbit.address, ready.terms.qbtSats);
-      this.log(`[maker] funded QBT HTLC ${ready.terms.qbtSats} sats (${fundTxid.slice(0, 12)})`);
-      this.#ev("funded", { swapId: id, leg: "qbit", sats: ready.terms.qbtSats, txid: fundTxid });
+      const fundTxid = await this.wallet.fundQbit(funded.htlc.qbit.address, funded.terms.qbtSats);
+      this.log(`[maker] funded QBT HTLC ${funded.terms.qbtSats} sats (${fundTxid.slice(0, 12)})`);
+      this.#ev("funded", { swapId: id, leg: "qbit", sats: funded.terms.qbtSats, txid: fundTxid });
     } else this.log(`[maker] QBT leg already funded (resume) — watching for the reveal`);
     this.inflight.delete(id);   // funded — the node balance now reflects this spend, so drop the reserve (no double-count)
 
@@ -266,7 +288,7 @@ export class MakerBot {
     //    timelock expires with no claim (-> we refund our QBT). Whichever comes first.
     while (true) {
       const v = await this.#api(`/swaps/${id}`, { token });
-      if (v.preimage) return this.#done(id, await this.#claimBtc({ id, token, v, btcPriv, destSpk: btcDest.spk }));
+      if (v.preimage) return this.#done(id, await this.#claimBtc({ id, token, v, btcPriv, destSpk: btcDest.spk, pinnedFee }));
       const h = await this.wallet.qbitHeight();
       if (v.funding?.qbit && h >= v.locktimes.qbit) return this.#done(id, await (this.#famQbit() === "p2mr-slhdsa"
         ? this.#refundQbit({ id, token, v, qbit, destSpk: qbitDest.spk })
@@ -277,22 +299,37 @@ export class MakerBot {
   }
   #done(id, result) { this.keystore?.markDone(id); return result; }
 
-  // Taker revealed the preimage on the QBT chain; sweep the BTC HTLC to our sink.
-  //
-  // Coordinator-fee awareness: when the coordinator charges a platform fee, the buyer funds the BTC HTLC
-  // with terms.btcSats + fee.sats, and the fee is a SEPARATE output the claim must pay to fee.address —
-  // it's honor-system (the coordinator is keyless and doesn't validate claim outputs), so a fee-blind
-  // claim would silently pocket the platform's cut AND overpay us. We split it exactly like the reference
-  // client: we net terms.btcSats (funding − fee.sats), the network fee for this tx comes out of the fee
-  // reserve, and the platform remainder goes to fee.address. With no fee configured, we just pay our own
-  // network fee out of the amount, as before.
-  async #claimBtc({ id, token, v, btcPriv, destSpk }) {
+  // Independently re-derive both HTLC scriptPubKeys from OUR keys + the counterparty pubkey + H +
+  // locktimes and confirm they match the coordinator's — a mismatch means the address we'd fund isn't
+  // the script we can claim/refund. Same check as the webapp's verifyHtlc; without it a corrupt
+  // coordinator can serve an attacker-script and we'd fund it.
+  #verifyHtlc(v, qbit, btcPub, selfRole) {
+    if (!v.roles || !v.locktimes || !v.counterparty?.qbitPub || !v.counterparty?.btcPub || !v.H) return true;   // not enough yet
+    try {
+      const H = bin(v.H), { fromLeg, toLeg } = v.roles;
+      const self = { qbit: qbit.pk, btc: btcPub };
+      const cp = { qbit: bin(v.counterparty.qbitPub), btc: bin(v.counterparty.btcPub) };
+      const pk = (role, coin) => (role === selfRole ? self[coin] : cp[coin]);
+      const spk = (leg, claimRole, refundRole) => (leg === "qbit" ? this.#famQbit() : "p2wsh-ecdsa") === "p2mr-slhdsa"
+        ? hex(p2mrSpk(htlcLeafQbit(H, pk(claimRole, leg), pk(refundRole, leg), v.locktimes[leg])))
+        : hex(p2wshSpk(htlcWitnessScript(H, pk(claimRole, leg), pk(refundRole, leg), v.locktimes[leg])));
+      // deriveHtlcs: fromLeg claim=participant(bob)/refund=initiator(alice); toLeg claim=alice/refund=bob
+      return spk(fromLeg, "bob", "alice") === v.htlc[fromLeg].spk && spk(toLeg, "alice", "bob") === v.htlc[toLeg].spk;
+    } catch { return false; }
+  }
+
+  // Claim the BTC leg: pay ONLY the pinned fee (never a live view's fee), and cap our own network fee.
+  // The counterparty's preimage is verified before we sign — a protocol break (preimage/hashing bug)
+  // doesn't cost us our BTC.
+  async #claimBtc({ id, token, v, btcPriv, destSpk, pinnedFee }) {
+    if (typeof v.preimage !== "string" || v.preimage.length !== 64 || hex(sha256(bin(v.preimage))) !== v.H)
+      throw new Error("refusable preimage: coordinator-supplied preimage doesn't match H — aborting");
     const f = v.funding.btc, ws = bin(v.htlc.btc.witnessScript);
     let outVal = f.amountSats - this.feeSats.btc, extraOut = null;
-    if (v.fee?.sats > 0 && v.fee.address) {
-      outVal = f.amountSats - v.fee.sats;                                        // we net exactly the agreed amount
-      const feeOut = v.fee.sats - Math.min(Math.max(0, this.feeSats.btc), v.fee.sats);   // platform remainder after the capped network fee
-      if (feeOut > DUST) extraOut = { spk: addressToScriptPubKey(v.fee.address), value: feeOut };
+    if (pinnedFee?.sats > 0 && pinnedFee.address) {
+      outVal = f.amountSats - pinnedFee.sats;
+      const feeOut = pinnedFee.sats - Math.min(Math.max(0, this.feeSats.btc), pinnedFee.sats);
+      if (feeOut > DUST) extraOut = { spk: addressToScriptPubKey(pinnedFee.address), value: feeOut };
     }
     const tx = btcSpend({
       prevTxidLE: bin(f.txid).reverse(), vout: f.vout, amount: f.amountSats, ws, priv: btcPriv,
@@ -351,6 +388,8 @@ export class MakerBot {
       body: { qbitPub: hex(qbit.pk), btcPub: hex(btcPub), btcDest: btcDest.address, qbitDest: qbitDest.address, H: hex(H) },
     });
     const ready = await this.#poll(`/swaps/${id}`, token, (v) => v.state !== "CREATED" && v.htlc);
+    if (!this.#verifyHtlc(ready, qbit, btcPub, "alice")) throw new Error("HTLC mismatch — coordinator-supplied scripts don't match our derived values (avoiding a theft)");
+    const pinnedFee = this.#feeFor(ready.terms.btcSats, ready.fee);
     this.log(`[maker] joined swap ${id.slice(0, 12)} as Alice -> ${ready.state}; BTC HTLC ${ready.htlc.btc.address}`);
 
     // 3) fund our BTC leg FIRST (the initiator funds unconditionally; it stays refundable until we

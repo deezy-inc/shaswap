@@ -4,7 +4,7 @@
 // bind it for the tailnet (ADMIN_BIND, default 0.0.0.0 behind a closed security group) and gate it
 // with ADMIN_TOKEN. Read-only: it exposes no mutation endpoints and redacts capability tokens.
 import http from "node:http";
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { allSwaps, getSwap, isOnline, subscribeAll, storeBackend, persistedCounts, persistedVolume, swapsIncludingSettled } from "./swap.js";
 import { allOffers } from "./offers.js";
 import { rfqStatus } from "./rfq.js";
@@ -138,11 +138,21 @@ async function overview() {
 const json = (res, code, body) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
 
 export function startAdmin(port = Number(process.env.ADMIN_PORT || 8790), opts = {}) {
-  const bind = opts.bind || process.env.ADMIN_BIND || "0.0.0.0";
+  // Bind loopback by default (tailnet-only box: serve.js sets ADMIN_BIND when it routes out).
+  const bind = opts.bind || process.env.ADMIN_BIND || "127.0.0.1";
+  // Token compared with timingSafeEqual (no length/timing oracle); per-IP backoff after failures.
   const TOKEN = opts.token || process.env.ADMIN_TOKEN || randomBytes(24).toString("hex");
+  const tokenBuf = Buffer.from(TOKEN);
+  const failures = new Map();
   const authed = (req, url) => {
+    const ip = req.socket.remoteAddress || "?";
+    const f = failures.get(ip);
+    if (f && Date.now() - f.at < Math.min(60_000, 500 * 2 ** Math.min(f.n, 7))) return false;   // backoff active
     const t = req.headers["x-admin-token"] || url.searchParams.get("token") || "";
-    return t && t === TOKEN;
+    const ok = t && t.length === TOKEN.length && timingSafeEqual(Buffer.from(t), tokenBuf);
+    const rec = failures.get(ip) || { n: 0, at: 0 };
+    failures.set(ip, ok ? { n: 0, at: 0 } : { n: rec.n + 1, at: Date.now() });
+    return ok;
   };
 
   const server = http.createServer(async (req, res) => {
@@ -184,8 +194,8 @@ export function startAdmin(port = Number(process.env.ADMIN_PORT || 8790), opts =
   });
 
   return new Promise((resolve) => server.listen(port, bind, () => {
-    console.log(`  admin dashboard: http://${bind === "0.0.0.0" ? "<tailnet-host>" : bind}:${port}/?token=${TOKEN}`);
-    if (!process.env.ADMIN_TOKEN && !opts.token) console.log(`  (ADMIN_TOKEN not set — generated the ephemeral token above; set ADMIN_TOKEN to keep it stable)`);
+    const access = process.env.ADMIN_TOKEN ? "with your configured token" : `ephemeral token: ${TOKEN}`;
+    console.log(`  admin dashboard: http://${bind}:${port} (${access}) — set ADMIN_TOKEN to keep it stable`);
     resolve(server);
   }));
 }

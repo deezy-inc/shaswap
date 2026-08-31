@@ -17,7 +17,11 @@ const bin = (h) => Uint8Array.from(h.match(/../g).map((x) => parseInt(x, 16)));
 
 export function fileKeystore(dir = process.env.MAKER_KEY_DIR || "./maker-keys") {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const path = (id, done = false) => join(dir, `${id}${done ? ".done" : ""}.json`);
+  const ok = (id) => typeof id === "string" && /^[a-zA-Z0-9]{3,80}$/.test(id);   // simple tokens only — no path chars
+  const path = (id, done = false) => {
+    if (!ok(id)) throw new Error(`unsafe swap id for keystore: "${String(id).slice(0, 80)}"`);
+    return join(dir, `${id}${done ? ".done" : ""}.json`);
+  };
   return {
     dir,
     // Persist a swap's signing material (call BEFORE join/fund). Uint8Array fields are hex-serialized.
