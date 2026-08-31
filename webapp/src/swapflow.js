@@ -196,7 +196,7 @@ export class SwapClient {
     if (!v.htlc) return;
     // Arm the coordinator watchtower once BOTH legs are funded: pre-sign a fee-ladder claim + a refund
     // so the swap completes/refunds even if this tab closes. Non-custodial — pays only our addresses.
-    if ((v.funding?.btc && v.funding?.qbit) || v.shortFunded?.[this.legs(v).fund]) { try { await this.armSafetyNet(v); } catch { /* retry next tick */ } }
+    if (v.funding?.[this.legs(v).fund] || (v.funding?.btc && v.funding?.qbit) || v.shortFunded?.[this.legs(v).fund]) { try { await this.armSafetyNet(v); } catch { /* retry next tick */ } }
 
     const done = (k) => this.acted.has(k) || v.broadcasts?.[k];
     const { claim, refund } = this.legs(v);
@@ -246,15 +246,19 @@ export class SwapClient {
     if (!v.htlc) return;
     const { fund, claim, refund } = this.legs(v);
     const bothFunded = v.funding?.btc && v.funding?.qbit;
-    // Underfunded MY leg: the swap can't complete, but the deposit is a real HTLC UTXO — pre-sign ONLY its
-    // refund so the watchtower reclaims it after the timelock even if this tab never comes back.
-    const shortMine = !bothFunded ? v.shortFunded?.[fund] : null;
-    if (!bothFunded && !shortMine) return;
+    // Refund-only arming: OUR deposit is a real HTLC UTXO even while the swap can't complete —
+    // underfunded, or the counterparty never funds theirs (an expired first leg). Pre-sign its refund
+    // the moment it exists, so the watchtower reclaims it after the timelock even if this tab never
+    // comes back. Without this, a solo-funded-then-abandoned swap had NO watchtower coverage and
+    // recovery depended entirely on the sender's backup file.
+    const mine = !bothFunded ? (v.funding?.[fund] || v.shortFunded?.[fund]) : null;
+    if (!bothFunded && !mine) return;
     // Arm as soon as the deposit(s) exist — even at 0-conf: the outpoints are known, so the recovery txs
-    // can be pre-signed now. Re-key on the live outpoints so a replaced/underfunded deposit re-arms.
+    // can be pre-signed now. Re-key on the live outpoints so a replaced/solo/underfunded deposit re-arms
+    // (and a solo arm upgrades to the full claim+refund bundle when the second leg lands).
     const key = bothFunded
       ? `${v.funding.btc.txid}:${v.funding.btc.vout}|${v.funding.qbit.txid}:${v.funding.qbit.vout}`
-      : `short:${shortMine.txid}:${shortMine.vout}`;
+      : `solo:${mine.txid}:${mine.vout}`;
     if (this.armedKey === key) return;
     // Build a fee-ladder of pre-signed txs for a leg/kind: skip any tier whose fee would leave a dust or
     // negative output (defensive; createSwap already floors amounts), always keeping at least the lowest.
