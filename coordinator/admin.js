@@ -8,7 +8,9 @@ import { randomBytes } from "node:crypto";
 import { allSwaps, getSwap, isOnline, subscribeAll, storeBackend, persistedCounts, persistedVolume, swapsIncludingSettled } from "./swap.js";
 import { allOffers } from "./offers.js";
 import { rfqStatus } from "./rfq.js";
-import { publicChains } from "./chains.js";
+import { publicChains, chain2Preset } from "./chains.js";
+// Dashboard branding follows the pair: a bip110 (shaswap) deployment shouldn't say "qbit-swap".
+const brandName = () => (chain2Preset() === "bip110" ? "shaswap" : "qbit-swap");
 import { qbit, btc } from "./chain.js";
 
 const TERMINAL = ["COMPLETE", "REFUNDED", "ABORTED"];
@@ -147,7 +149,7 @@ export function startAdmin(port = Number(process.env.ADMIN_PORT || 8790), opts =
     const url = new URL(req.url, "http://x");
     const p = url.pathname;
     try {
-      if (p === "/" || p === "/index.html") { res.writeHead(200, { "content-type": "text/html" }); return res.end(PAGE); }
+      if (p === "/" || p === "/index.html") { res.writeHead(200, { "content-type": "text/html" }); return res.end(PAGE.replaceAll("qbit-swap", brandName())); }
       // everything under /api requires the token
       if (p.startsWith("/api/") || p === "/stream") {
         if (!authed(req, url)) return json(res, 401, { error: "admin token required (?token= or X-Admin-Token)" });
