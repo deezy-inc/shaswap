@@ -1008,6 +1008,27 @@ function swapTimeline(v, send, recv, action, paused) {
   }));
 }
 
+// Fork-pair replay acknowledgment: on bip110 the deposit prompt stays hidden behind a blocking modal
+// until the sender checks "I understand replay protection" and clicks OK — once per swap, persisted
+// so a reload doesn't re-ask. (The modal is rebuilt on every live update, so the in-progress checkbox
+// state lives on `flow` to survive re-renders.)
+const replayAckKey = (id) => `replay-ack-${id}`;
+const replayAcked = (id) => { try { return localStorage.getItem(replayAckKey(id)) === "1"; } catch { return false; } };
+const replayAckPending = (v, funded) => BRAND === "bip110" && !funded && !replayAcked(v.id);
+function buildReplayAckModal(v, fundLeg) {
+  const ok = h("button", { class: "primary", style: "width:100%;margin-top:16px", disabled: !flow._replayChk,
+    onclick: () => { try { localStorage.setItem(replayAckKey(v.id), "1"); } catch {} flow._replayChk = false; rerender(); } }, t("replayAckOk"));
+  const chk = h("input", { type: "checkbox", checked: !!flow._replayChk, style: "width:auto;margin:2px 9px 0 0;flex:0 0 auto",
+    onchange: () => { flow._replayChk = chk.checked; ok.disabled = !chk.checked; } });
+  return h("div", { class: "modal-back" },
+    h("div", { class: "modal" },
+      h("div", { style: "font-weight:640;color:var(--warn);font-size:15px" }, "⚠️ " + t("replayWarnTitle")),
+      h("p", { class: "note", style: "margin-top:10px" }, t(fundLeg === "btc" ? "replayWarnSha" : "replayWarnBlake")),
+      h("p", { class: "note dim", style: "margin-top:8px" }, t("replayWarnSplit")),
+      h("label", { style: "display:flex;margin-top:16px;align-items:flex-start;gap:2px;font-size:13px;color:var(--fg);cursor:pointer" },
+        chk, h("span", {}, t("replayAckLabel"))),
+      ok));
+}
 function renderLive(card, v) {
   while (card.firstChild) card.removeChild(card.firstChild);
   // Backfill deal details from the coordinator view (authoritative) — on a resume from a backup file
@@ -1084,7 +1105,7 @@ function renderLive(card, v) {
   // It renders INLINE on the active timeline step below — not as a banner above the timeline — so the page
   // reads top-to-bottom and the action sits on the step we're actually on. It's null once there's nothing
   // to do (our own deposit is buried, or we're only waiting on the counterparty — the timeline says so).
-  let action = null;
+  let action = null, replayAckModal = null;
   if (!terminal && addr && expired) {
     // The funding window elapsed — the timelocks were fixed at setup, so funding this late is no longer
     // safe. Refuse to show the deposit address; send them to make a fresh swap.
@@ -1111,6 +1132,11 @@ function renderLive(card, v) {
       h("div", { style: "font-size:16px;font-weight:600" }, t("seqGateTitle")),
       h("p", { class: "note", style: "margin-top:6px" }, t("seqGateBody")),
       h("p", { class: "note", style: "margin-top:10px;font-weight:600;color:var(--warn)" }, status));
+  } else if (!terminal && addr && !fundBuried(v, fundLeg, funded) && replayAckPending(v, funded)) {
+    // Fork-pair replay warning as its OWN blocking modal, BEFORE the deposit prompt: the swap's
+    // settlement txs are replay-protected by the app, but the DEPOSIT comes from the user's wallet.
+    // The "send exactly…" box stays hidden until they check "I understand" and click OK.
+    replayAckModal = buildReplayAckModal(v, fundLeg);
   } else if (!terminal && addr && !fundBuried(v, fundLeg, funded)) {
     // Deposit prompt — shown while our leg is not yet buried (still to send, or sent and confirming).
     const feerate = Math.max(1, Math.round(v.feerates?.[fundLeg]?.fastestFee || 0));
@@ -1126,14 +1152,6 @@ function renderLive(card, v) {
       (!funded && send === "BTC" && feerate > 1) ? h("p", { class: "note", style: "margin-top:6px" }, t("feeRateHint", { rate: feerate })) : null,
       // Staggered-funding expectation for the BTC buyer (who funds first): the seller deposits only after this confirms.
       send === "BTC" ? h("p", { class: "note", style: "margin-top:6px;color:var(--mut)" }, t(funded ? "seqBuyerFundedNote" : "seqBuyerNote")) : null,
-      // Fork-pair replay warning, shown BEFORE the user sends: the swap's own settlement txs are
-      // replay-protected by the app, but this DEPOSIT comes from their wallet. Per-side mechanism
-      // (SHA256: >83-byte OP_RETURN; Blake2b: opt-in SIGHASH_UNIFIED) — and none of it is needed
-      // when the coins are already split, which the note says first.
-      (!funded && BRAND === "bip110") ? h("div", { style: "margin-top:10px;padding:10px 12px;border:1px solid var(--warn);border-radius:10px;background:var(--warn-soft)" },
-        h("div", { style: "font-weight:640;color:var(--warn);font-size:13px" }, "⚠️ " + t("replayWarnTitle")),
-        h("p", { class: "note", style: "margin-top:5px" }, t(fundLeg === "btc" ? "replayWarnSha" : "replayWarnBlake")),
-        h("p", { class: "note dim", style: "margin-top:5px" }, t("replayWarnSplit"))) : null,
       funded ? null : h("div", { class: "mono", style: "margin-top:6px" }, addr),
       funded ? null : h("div", { class: "btns" }, copyButton("copyAddress", "copiedCheck", () => addr)),
       (!funded && minsLeft != null) ? h("p", { class: "note", style: `margin-top:10px;color:${minsLeft <= 10 ? "var(--warn)" : "var(--mut)"}` }, t("fundCountdown", { mins: minsLeft })) : null);
@@ -1145,6 +1163,7 @@ function renderLive(card, v) {
   if (shorted) action = null;   // the "send exactly X" prompt is moot once an underfunded deposit exists — cross out the flow instead
   if (v.htlc) card.append(swapTimeline(v, send, recv, action, shorted));
   else if (action) card.append(action);   // pre-HTLC edge (addr implies htlc, so rare) — keep the action visible
+  if (replayAckModal && !shorted) card.append(replayAckModal);   // blocking replay-protection ack (fixed overlay; sits above everything)
   // Bottom status line only when there's NO inline action box — otherwise it just repeats the prominent
   // in-timeline status (e.g. "waiting for the BTC deposit to confirm"). With an action shown, it's noise.
   if (!action && !shorted) card.append(h("p", { class: "note" }, statusLine(v, send, recv)));   // paused → the warning below is the status

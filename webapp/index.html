@@ -95,6 +95,11 @@
   .card h2 { color:var(--ink); font-size:19px; font-weight:660; letter-spacing:-.015em; margin:0 0 8px; text-wrap:balance; line-height:1.28; }
   .card h3 { margin:0; }
   @keyframes enter { from { opacity:0; transform:translateY(6px) scale(.995); } to { opacity:1; transform:none; } }
+  /* blocking modal (replay-protection acknowledgment) — fixed overlay above the wizard card */
+  .modal-back { position:fixed; inset:0; background:rgba(0,0,0,.62); display:flex; align-items:center;
+    justify-content:center; z-index:60; padding:20px; backdrop-filter:blur(2px); }
+  .modal { background:var(--surface); border:1px solid var(--warn); border-radius:var(--r-lg);
+    padding:22px; width:100%; max-width:460px; box-shadow:var(--shadow); animation:enter .26s var(--ease) both; }
 
   .muted { color:var(--mut); }
   /* body-adjacent helper text — kept high enough contrast to read (≥4.5:1), not decorative gray */
