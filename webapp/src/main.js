@@ -1130,7 +1130,9 @@ function renderLive(card, v) {
     const status = !g.funded ? t("seqWaitNoBtc") : g.unconfirmed ? t("seqWaitMempool") : t("seqWaitConfs", { confs: g.confs, need: g.need });
     action = h("div", { class: "fund" },
       h("div", { style: "font-size:16px;font-weight:600" }, t("seqGateTitle")),
-      h("p", { class: "note", style: "margin-top:6px" }, t("seqGateBody")),
+      // Body reflects reality: once the counterparty's deposit is SEEN (mempool or confirming), stop
+      // saying "waiting for them to send" — it's sent, we're waiting on confirmations.
+      h("p", { class: "note", style: "margin-top:6px" }, t(g.funded ? "seqGateBodySeen" : "seqGateBody")),
       h("p", { class: "note", style: "margin-top:10px;font-weight:600;color:var(--warn)" }, status));
   } else if (!terminal && addr && !fundBuried(v, fundLeg, funded) && replayAckPending(v, funded)) {
     // Fork-pair replay warning as its OWN blocking modal, BEFORE the deposit prompt: the swap's
