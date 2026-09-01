@@ -50,6 +50,8 @@ function summary(s) {
     armed: { alice: !!s.finish?.alice, bob: !!s.finish?.bob }, // watchtower pre-signed
     preimage: !!s.preimage,
     short: s.shortFunded || null,
+    // Fork-pair replay twins: per funded leg, { detectedAt, waiting?, lockHeight?, sweepTxid?, resolved? }
+    twin: s.twin || null,
     risk: riskOf(s),
   };
 }
@@ -75,16 +77,34 @@ function detail(s) {
 
 // Every action the coordinator's watchtower took on behalf of an OFFLINE party, flattened across swaps
 // and enriched: resolve the tier index to its actual feerate, and which leg/chain it hit. Newest first.
+// Fork-pair replay twins: a deposit that was copied onto the other chain, and what the coordinator
+// is doing about it. `waiting` says which gate is still unmet (see driveTwinSweep).
+function twinRows() {
+  const out = [];
+  for (const s of swapsIncludingSettled()) {
+    for (const [fundLeg, t] of Object.entries(s.twin || {})) {
+      out.push({ swapId: s.id, fundLeg, sweepLeg: fundLeg === "btc" ? "qbit" : "btc",
+        detectedAt: t.detectedAt || null, homeSpentAt: t.homeSpentAt || null,
+        lockHeight: t.lockHeight ?? s.locktimes?.[fundLeg] ?? null,
+        waiting: t.resolved ? null : (t.waiting || "checking"),
+        resolved: t.resolved || null, sweepTxid: t.sweepTxid || null, state: s.state });
+    }
+  }
+  return out.sort((a, b) => (a.resolved ? 1 : 0) - (b.resolved ? 1 : 0) || (b.detectedAt || 0) - (a.detectedAt || 0));
+}
+
 function watchtowerActions() {
   const out = [];
   for (const s of swapsIncludingSettled()) {   // incl. evicted settled swaps — their wt actions are history worth showing
     for (const [key, rec] of Object.entries(s.wt || {})) {
       const [role, kind] = key.split(":");
-      const leg = kind === "claim"
+      const leg = kind === "twin"
+        ? s.finish?.[role]?.twin?.leg                                // twin: broadcast on the OTHER chain of the pair
+        : kind === "claim"
         ? (role === "alice" ? s.roles?.toLeg : s.roles?.fromLeg)     // claim: initiator takes toLeg, participant takes fromLeg
         : (role === "alice" ? s.roles?.fromLeg : s.roles?.toLeg);    // refund: own funded leg
-      const feerate = kind === "claim" && typeof rec.tier === "number"
-        ? s.finish?.[role]?.claim?.tiers?.[rec.tier]?.feerate ?? null : null;
+      const feerate = typeof rec.tier === "number"
+        ? s.finish?.[role]?.[kind]?.tiers?.[rec.tier]?.feerate ?? null : null;
       out.push({ swapId: s.id, role, kind, leg, tier: rec.tier, feerate, txid: rec.txid, at: rec.at, ts: rec.ts || null, state: s.state });
     }
   }
@@ -180,6 +200,7 @@ export function startAdmin(port = Number(process.env.ADMIN_PORT || 8790), opts =
       }
       if (p === "/api/offers") return json(res, 200, allOffers());
       if (p === "/api/watchtower") return json(res, 200, watchtowerActions());
+      if (p === "/api/twins") return json(res, 200, twinRows());
       if (p === "/stream") {
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
         res.write(": connected\n\n"); // immediate flush so EventSource fires onopen right away
@@ -293,7 +314,7 @@ function gate(){
   window.sv=()=>{TOKEN=$("#tk").value.trim();sessionStorage.setItem("qadm",TOKEN);boot()};
 }
 async function boot(){
-  try{ await refreshOverview(); await refreshSwaps(); await refreshWatchtower(); connectStream(); }
+  try{ await refreshOverview(); await refreshSwaps(); await refreshWatchtower(); await refreshTwins(); connectStream(); }
   catch(e){ if(String(e.message).includes("401")) return gate(); $("#app").innerHTML='<div class="empty">error: '+e.message+'</div>'; }
 }
 async function refreshOverview(){
@@ -322,6 +343,8 @@ function renderShell(cards){
     +'<table><thead id="swhead"></thead><tbody id="rows"></tbody></table>'
     +'<div class="row" style="margin-top:24px"><b>watchtower actions</b> <span class="mut" id="wtcount"></span><span class="mut" style="font-weight:400"> — txs the coordinator broadcast for an offline party</span></div>'
     +'<table><thead><tr><th>when</th><th>swap</th><th>party</th><th>action</th><th>leg</th><th>feerate</th><th>txid</th></tr></thead><tbody id="wtrows"></tbody></table>'
+    +'<div class="row" style="margin-top:24px"><b>replay twins</b> <span class="mut" id="twcount"></span><span class="mut" style="font-weight:400"> — deposits copied onto the other chain of the fork, swept back to their sender</span></div>'
+    +'<table><thead><tr><th>detected</th><th>swap</th><th>deposit leg</th><th>sweep on</th><th>status</th><th>lock height</th><th>txid</th></tr></thead><tbody id="twrows"></tbody></table>'
     +'<div id="log"><div class="row" style="margin-top:24px"><b>activity</b></div><div id="loglines"></div></div>';
   $("#swhead").innerHTML=swapHeadHtml();
   $("#q").oninput=(e)=>{Q=e.target.value.trim().toLowerCase();renderRows()};
@@ -367,13 +390,29 @@ window.openSwap=async(id)=>{
 };
 function wtRowHtml(a){
   const leg=(a.leg||"?").toUpperCase();
-  const act=a.kind==="claim"?'<span class="badge b-claim">claim</span>':'<span class="badge b-refund">refund</span>';
-  const fee=a.kind==="claim"
-    ?(a.feerate!=null?'<b>'+a.feerate+'</b> <span class="mut">sat/vB · tier '+a.tier+'</span>':'<span class="mut">tier '+a.tier+'</span>')
-    :'<span class="mut">—</span>';
+  const act=a.kind==="claim"?'<span class="badge b-claim">claim</span>'
+    :a.kind==="twin"?'<span class="badge b-refund" title="replayed deposit swept back to its sender">replay sweep</span>'
+    :'<span class="badge b-refund">refund</span>';
+  const fee=a.feerate!=null?'<b>'+a.feerate+'</b> <span class="mut">sat/vB · tier '+a.tier+'</span>'
+    :(a.tier!=null?'<span class="mut">tier '+a.tier+'</span>':'<span class="mut">—</span>');
   return '<tr onclick="openSwap(\\''+a.swapId+'\\')"><td class="mut">'+(a.ts?ago(a.ts)+' ago':'—')+
     '</td><td class="mono">'+short(a.swapId)+'</td><td>'+a.role+'</td><td>'+act+'</td><td>'+leg+
     '</td><td>'+fee+'</td><td class="mono mut" title="'+(a.txid||'')+'">'+short(a.txid)+'…</td></tr>';
+}
+function twRowHtml(t){
+  const legLbl=(l)=>l==="btc"?LBL.btc:LBL.qbt;
+  const status=t.resolved==="swept"?'<span class="badge b-claim">swept</span>'
+    :t.resolved==="external"?'<span class="mut">reclaimed by owner</span>'
+    :'<span class="badge b-refund" title="'+t.waiting+'">pending</span> <span class="mut">'+t.waiting+'</span>';
+  return '<tr onclick="openSwap(\\''+t.swapId+'\\')"><td class="mut">'+(t.detectedAt?ago(t.detectedAt)+' ago':'—')+
+    '</td><td class="mono">'+short(t.swapId)+'</td><td>'+legLbl(t.fundLeg)+'</td><td>'+legLbl(t.sweepLeg)+
+    '</td><td>'+status+'</td><td class="mono mut">'+(t.lockHeight??'—')+
+    '</td><td class="mono mut" title="'+(t.sweepTxid||'')+'">'+(t.sweepTxid?short(t.sweepTxid)+'…':'—')+'</td></tr>';
+}
+async function refreshTwins(){
+  const rows=await api("/api/twins");const tb=$("#twrows");if(!tb)return;
+  $("#twcount").textContent=rows.length?("· "+rows.length):"";
+  tb.innerHTML=rows.length?rows.map(twRowHtml).join(""):'<tr><td colspan="7" class="empty">no replayed deposits detected</td></tr>';
 }
 async function refreshWatchtower(){
   const acts=await api("/api/watchtower");const tb=$("#wtrows");if(!tb)return;
@@ -401,7 +440,7 @@ function connectStream(){
     if(!prev||prev.state!==s.state)renderOverviewSoon(); // new swap or transition (incl. watchtower acting) -> refresh overview + wt panel
   };
 }
-let ovT;function renderOverviewSoon(){clearTimeout(ovT);ovT=setTimeout(()=>{refreshOverview().catch(()=>{});refreshWatchtower().catch(()=>{});},400);}
-setInterval(()=>{refreshOverview().catch(()=>{});refreshWatchtower().catch(()=>{});},8000); // heights + counts + watchtower tick
+let ovT;function renderOverviewSoon(){clearTimeout(ovT);ovT=setTimeout(()=>{refreshOverview().catch(()=>{});refreshWatchtower().catch(()=>{});refreshTwins().catch(()=>{});},400);}
+setInterval(()=>{refreshOverview().catch(()=>{});refreshWatchtower().catch(()=>{});refreshTwins().catch(()=>{});},8000); // heights + counts + watchtower + replay twins
 if(!TOKEN)gate();else boot();
 </script></body></html>`;
