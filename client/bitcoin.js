@@ -83,7 +83,11 @@ export function replayMarkerSpk() {
 // callers may be building from coordinator-reported (hostile) data.
 export function btcSpend({ prevTxidLE, vout, amount, ws, priv, destSpk, outVal, branch, preimage, locktime = 0, extraOut = null, replay = false }) {
   if (branch !== "claim" && branch !== "refund") throw new Error(`bad branch "${branch}"`);
-  if (branch === "claim" && preimage.length !== 32) throw new Error(`claim preimage must be 32 bytes (got ${preimage.length})`);
+  // A claim's preimage must be the real 32-byte secret — EXCEPT the empty placeholder used when
+  // pre-signing the watchtower ladder preimage-LESS (the participant doesn't know the secret yet;
+  // the coordinator splices it into the witness at broadcast, which can't alter the signed outputs).
+  // Rejecting the placeholder silently disarmed every participant-side safety net.
+  if (branch === "claim" && preimage.length !== 32 && preimage.length !== 0) throw new Error(`claim preimage must be 32 bytes, or empty when pre-signing for the watchtower (got ${preimage.length})`);
   if (branch === "refund") checkLocktime(locktime);
   amount = BigInt(amount); outVal = BigInt(outVal);
   if (amount <= 0n) throw new Error(`bad input amount ${amount}`);

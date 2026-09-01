@@ -53,13 +53,13 @@ export const REORG_MODELS = ["btc-subsidy", "conftarget-rpc", "fixed"];
 // BTC-SHA256 ⇄ BTC-Blake2b so users always know which chain of the fork they're on.
 const CHAIN2_PRESETS = {
   qbit:   { label: "QBT",         btcLabel: "BTC",        hrp: "qbrt", blockSecs: 60,  minSats: 200000, minConfs: 1, script: "p2mr-slhdsa", reorgModel: "conftarget-rpc", fixedConfs: 6,  btcReplay: false, forkTwin: false, esplora: "https://mempool.space/api",  btcExplorer: "https://mempool.space/tx/",          qbitExplorer: "https://qbitmempool.robertclarke.com/tx/" },
-  bip110: { label: "BTC-Blake2b", btcLabel: "BTC-SHA256", hrp: "bc",   blockSecs: 600, minSats: 50000,  minConfs: 1, script: "p2wsh-ecdsa", reorgModel: "fixed",          fixedConfs: 1, fixedScaleBtc: 0.01, fixedMaxConfs: 12, btcReplay: true,  forkTwin: true,  esplora: "https://mempool.guide/api", btcExplorer: "https://mempool.guide/tx/",       qbitExplorer: "https://mempool.guide/tx/" },
+  bip110: { label: "BTC-Blake2b", btcLabel: "BTC-SHA256", hrp: "bc",   blockSecs: 600, minSats: 50000,  minConfs: 1, script: "p2wsh-ecdsa", reorgModel: "fixed",          fixedConfs: 1, fixedScaleBtc: 0.01, fixedMaxConfs: 12, btcReplay: true,  forkTwin: true,  esplora: "https://mempool.space/api", btcExplorer: "https://mempool.space/tx/",      qbitExplorer: "https://mempool.guide/tx/" },
 };
 export const chain2Preset = () => env("CHAIN2", "qbit");
-// The pair's default BTC-side Esplora endpoint (fees + the optional esplora chain backend). The qbit
-// pair points at mempool.space; the bip110 fork deployment (shaswap.com) keeps its own dedicated
-// Esplora instance at mempool.guide — so a CHAIN2=bip110 deployer never accidentally reads prices or
-// funding from an unrelated Qbit service. Env override (ESPLORA_URL / MEMPOOL_URL) always wins.
+// The pair's default BTC-side Esplora endpoint (fees + the optional esplora chain backend). The
+// "btc" slot is REAL Bitcoin on every preset — including bip110, where only the SECOND slot is the
+// Blake2b fork (mempool.guide is the fork's explorer, wrong chain for BTC-side fees/funding) — so
+// this is mempool.space across presets. Env override (ESPLORA_URL / MEMPOOL_URL) always wins.
 export const pairEsploraUrl = () => env("ESPLORA_URL", CHAIN2_PRESETS[chain2Preset()]?.esplora || "https://mempool.space/api");
 // Fork pairs share pre-fork history + tx format, so an UNPROTECTED deposit can be replayed onto the
 // other chain — an identical "twin" UTXO at the same outpoint, paying the same HTLC script. When this

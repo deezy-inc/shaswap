@@ -908,8 +908,8 @@ function startLive() {
 }
 const STATE_CLASS = { COMPLETE: "good", REFUNDED: "warn", CLAIMABLE: "info", CLAIMED: "info", ABORTED: "bad", CANCELED: "warn" };
 // Public block explorers for the tx links in the timeline. Derived from the injected chain config
-// (QBIT_CHAINS): on the bip110 fork pair the BTC explorer is the pair's own instance (mempool.guide),
-// not a Qbit-branded one; the qbit pair uses mempool.space / the Qbit mempool.
+// (QBIT_CHAINS): the btc slot is real Bitcoin on every pair (mempool.space); the second slot's
+// explorer follows the preset (Qbit mempool, or mempool.guide for the Blake2b fork).
 const _CFG = globalThis.QBIT_CHAINS || {};
 const _btcExplorer = _CFG.btc?.explorer || "https://mempool.space/tx/";
 const _qbitExplorer = _CFG.qbit?.explorer || "https://qbitmempool.robertclarke.com/tx/";
