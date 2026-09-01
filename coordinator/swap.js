@@ -721,21 +721,25 @@ export async function driveTwinSweep(s) {
       console.log(`[twin] swap ${s.id}: ${chainCfg(tw.fundLeg).label} deposit ${f.txid.slice(0, 16)}… replayed onto ${chainCfg(tw.leg).label} — sweeping back after the timelock`);
       touch(s);
     }
+    // Surface WHY the sweep hasn't fired yet (admin/UI reads it) — written only on reason CHANGES so
+    // the store isn't churned every probe. lockHeight is the twin-chain height the sweep needs.
+    t.lockHeight ??= s.locktimes[tw.fundLeg];
+    const wait = (reason) => { if (t.waiting !== reason) { t.waiting = reason; touch(s); } };
     // 2) the REAL deposit must be spent on its home chain, settled past a reorg-safe delay.
-    if (await home.isUnspent(f.txid, f.vout)) continue;
+    if (await home.isUnspent(f.txid, f.vout)) { wait("home-deposit-unspent"); continue; }
     if (!t.homeSpentAt) { t.homeSpentAt = now; touch(s); }
-    if (now - t.homeSpentAt < TWIN_SWEEP_DELAY_MS()) continue;
+    if (now - t.homeSpentAt < TWIN_SWEEP_DELAY_MS()) { wait("reorg-delay"); continue; }
     // 3) the pre-signed sweep's nLockTime is the HTLC's CLTV height — final only once the TWIN chain
     //    reaches it (a lagging fork chain gets there later; the sweep just waits).
-    if ((await twinChain.height()) < s.locktimes[tw.fundLeg]) continue;
+    if ((await twinChain.height()) < s.locktimes[tw.fundLeg]) { wait("twin-chain-below-lock-height"); continue; }
     // 4) still unswept? (the owner may have reclaimed it themselves out-of-band)
-    if (!(await twinChain.isUnspent(f.txid, f.vout))) { s.wt[key] = { done: true, ts: now }; t.resolved = "external"; touch(s); continue; }
+    if (!(await twinChain.isUnspent(f.txid, f.vout))) { s.wt[key] = { done: true, ts: now }; t.resolved = "external"; delete t.waiting; touch(s); continue; }
     const tier = await pickTier(tw.leg, tw.tiers, s.wt[key]?.tier || 0);
     const acc = await twinChain.testAccept(tw.tiers[tier].tx);
-    if (!acc.allowed) continue;                     // non-final / fee too low right now — retry next probe
+    if (!acc.allowed) { wait(`mempool: ${acc.reason || "not accepted"}`); continue; }   // non-final / fee too low right now — retry next probe
     const txid = await twinChain.broadcast(tw.tiers[tier].tx);
     s.wt[key] = { txid, tier, ts: now, done: true };
-    t.sweepTxid = txid; t.resolved = "swept";
+    t.sweepTxid = txid; t.resolved = "swept"; delete t.waiting;
     console.log(`[twin] swap ${s.id}: replayed ${chainCfg(tw.fundLeg).label} deposit swept back to its sender on ${chainCfg(tw.leg).label} (${txid.slice(0, 16)}…)`);
     touch(s);
   }
