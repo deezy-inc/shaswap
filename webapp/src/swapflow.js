@@ -348,7 +348,11 @@ export class SwapClient {
   // Twin sweep: refund-branch spend of our FUND-leg deposit outpoint, destined for the OTHER chain of
   // a fork pair (same script rules, so the same ECDSA signing applies — only the marker differs).
   async #buildTwin(v, fundLeg, twinLeg, feeSats) {
-    const f = v.funding[fundLeg] || v.shortFunded?.[fundLeg], ws = bin(v.htlc[fundLeg].witnessScript), destSpk = addressToScriptPubKey(this.#destOf(fundLeg));
+    // Pay the address we gave for the chain the twin LIVES on, not the one for the leg we funded: the
+    // recovered coins are fork-chain coins, so they belong in the fork-chain wallet the user nominated.
+    // (Both slots share an address format on a fork pair, so the funded-leg address would have "worked"
+    // — but it would drop the coins in the wrong wallet.)
+    const f = v.funding[fundLeg] || v.shortFunded?.[fundLeg], ws = bin(v.htlc[fundLeg].witnessScript), destSpk = addressToScriptPubKey(this.#destOf(twinLeg));
     return btcSpend({ prevTxidLE: bin(f.txid).reverse(), vout: f.vout, amount: f.amountSats, ws, priv: this.#privOf(fundLeg), destSpk, outVal: f.amountSats - feeSats, branch: "refund", preimage: new Uint8Array(0), locktime: v.locktimes[fundLeg], extraOut: null, replay: this.replayOf(twinLeg) });
   }
 

@@ -687,8 +687,8 @@ export async function driveWatchtower(s) {
 // ── fork-pair twin sweep ──────────────────────────────────────────────────────
 // If a sender skips replay protection, their deposit tx can be replayed onto the OTHER chain of the
 // fork — an identical "twin" UTXO at the same outpoint, paying the same HTLC script. The refund path
-// still belongs to the sender, so once the timelock allows, the watchtower returns the twin to their
-// refund address using the `twin` tiers the client pre-signed for that chain (see submitFinish).
+// still belongs to the sender, so once the timelock allows, the watchtower returns the twin to the
+// address they nominated ON THAT CHAIN, using the `twin` tiers the client pre-signed (see submitFinish).
 //
 // Broadcast ONLY after the real deposit's outpoint is spent on its home chain (the swap settled) plus
 // a delay: the fork-leg twin sweep carries no marker (BIP-110 forbids large datacarriers there), so a

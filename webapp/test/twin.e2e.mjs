@@ -79,7 +79,7 @@ async function main() {
     ck(mock.qbit.utxo.get(ftwin)?.spent, "twin swept once the fork chain reached the CLTV height");
     const sweep = mock.qbit.tx.get(swept.twin.btc.sweepTxid);
     ck(sweep && !hasReplayMarker(sweep.vout), "the fork-chain sweep carries NO marker (BIP-110 would refuse it)");
-    ck(hex(sweep.vout[0][1]) === hex(addressToScriptPubKey(A.btcDest)), "…and pays the SENDER's own refund address");
+    ck(hex(sweep.vout[0][1]) === hex(addressToScriptPubKey(A.qbitDest)), "…and pays the sender's BTC-Blake2b address (the chain the coins are on), not their BTC one");
   }
 
   // ── 2) fork deposit replayed onto the btc chain → sweep WITH the marker ─────────────────────────
@@ -94,7 +94,7 @@ async function main() {
     const swept = await until(async () => { const v = await api(`/swaps/${id}`, { token: B.token }); return v.twin?.qbit?.resolved === "swept" ? v : null; });
     const sweep = mock.btc.tx.get(swept.twin.qbit.sweepTxid);
     ck(sweep && hasReplayMarker(sweep.vout), "the btc-chain sweep CARRIES the marker (cannot cross back over the fork)");
-    ck(hex(sweep.vout[0][1]) === hex(addressToScriptPubKey(B.qbitDest)), "…and pays the fork-side sender's refund address");
+    ck(hex(sweep.vout[0][1]) === hex(addressToScriptPubKey(B.btcDest)), "…and pays that sender's BTC-SHA256 address (the chain the coins are on), not their fork one");
   }
 
   // ── 2b) the twin chain refuses the cheapest tier → coordinator escalates the ladder ────────────
