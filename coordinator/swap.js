@@ -734,9 +734,19 @@ export async function driveTwinSweep(s) {
     if ((await twinChain.height()) < s.locktimes[tw.fundLeg]) { wait("twin-chain-below-lock-height"); continue; }
     // 4) still unswept? (the owner may have reclaimed it themselves out-of-band)
     if (!(await twinChain.isUnspent(f.txid, f.vout))) { s.wt[key] = { done: true, ts: now }; t.resolved = "external"; delete t.waiting; touch(s); continue; }
-    const tier = await pickTier(tw.leg, tw.tiers, s.wt[key]?.tier || 0);
-    const acc = await twinChain.testAccept(tw.tiers[tier].tx);
-    if (!acc.allowed) { wait(`mempool: ${acc.reason || "not accepted"}`); continue; }   // non-final / fee too low right now — retry next probe
+    // Walk UP the ladder on rejection. pickTier only price-checks the btc slot, so a sweep going out on
+    // the second slot would otherwise retry tier 0 forever — exactly how a too-thin pre-signed tier
+    // ("min relay fee not met") deadlocks. A higher tier is strictly more acceptable, so try each.
+    let tier = await pickTier(tw.leg, tw.tiers, s.wt[key]?.tier || 0);
+    let acc = await twinChain.testAccept(tw.tiers[tier].tx);
+    while (!acc.allowed && tier + 1 < tw.tiers.length) { tier++; acc = await twinChain.testAccept(tw.tiers[tier].tx); }
+    if (!acc.allowed) {
+      wait(`mempool: ${acc.reason || "not accepted"}`);
+      // Remember the escalation only when the blocker was economic; a transient/structural refusal
+      // (e.g. still non-final) shouldn't permanently push future attempts to the priciest tier.
+      if (/fee|dust|insufficient/i.test(acc.reason || "")) s.wt[key] = { ...(s.wt[key] || {}), tier };
+      continue;
+    }
     const txid = await twinChain.broadcast(tw.tiers[tier].tx);
     s.wt[key] = { txid, tier, ts: now, done: true };
     t.sweepTxid = txid; t.resolved = "swept"; delete t.waiting;

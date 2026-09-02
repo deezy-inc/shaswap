@@ -41,7 +41,18 @@ export class MockChain {
     return null;
   }
   async isUnspent(txid, vout) { const u = this.utxo.get(`${txid}:${vout}`); return !!u && !u.spent; }
-  async testAccept() { return { allowed: true }; }
+  // Optional relay policy: set `minRelay` (sat/vB) to make the chain refuse underpaying txs, the way a
+  // real node rejects a pre-signed tier with "min relay fee not met".
+  async testAccept(txHex) {
+    if (!this.minRelay || !txHex) return { allowed: true };
+    const bytes = Uint8Array.from(txHex.match(/../g).map((h) => parseInt(h, 16)));
+    const t = parseTx(bytes);
+    let inSats = 0;
+    for (const [prevout, vout] of t.vin) { const u = this.utxo.get(`${revHex(prevout)}:${vout}`); if (!u) return { allowed: true }; inSats += u.amountSats; }
+    const outSats = t.vout.reduce((n, [v]) => n + Number(v), 0);
+    const vsize = Math.ceil(bytes.length / 2);   // rough witness discount; enough to price a tier
+    return (inSats - outSats) / vsize >= this.minRelay ? { allowed: true } : { allowed: false, reason: "min relay fee not met" };
+  }
   async broadcast(txHex) {
     const bytes = Uint8Array.from(txHex.match(/../g).map((h) => parseInt(h, 16)));
     const t = parseTx(bytes), txid = txidOf(bytes);

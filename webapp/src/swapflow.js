@@ -293,8 +293,12 @@ export class SwapClient {
     if ((v.chains || this.view?.chains || this.chains)?.[fund]?.forkTwin && this.famOf(fund) === "p2wsh-ecdsa") {
       const amt = (v.funding?.[fund] || v.shortFunded?.[fund]).amountSats;
       const xvb = this.replayOf(twinLeg) ? REPLAY_VB : 0;
-      const aff = LADDER[twinLeg].map((fr) => ({ fr, fee: feeFor(fund, "refund", fr, v.feerates, xvb) })).filter(({ fee }) => amt - fee > DUST);
-      const use = aff.length ? aff : [{ fr: LADDER[twinLeg][0], fee: feeFor(fund, "refund", LADDER[twinLeg][0], v.feerates, xvb) }];
+      // Size against the TWIN leg (the chain this tx is relayed on), not the funded leg — and use the
+      // Bitcoin ladder whenever that chain is Bitcoin-family: a fork chain has a real fee market and a
+      // 1 sat/vB floor, so the sparse qbit ladder's bottom tier lands under min-relay and never confirms.
+      const ladder = this.famOf(twinLeg) === "p2wsh-ecdsa" ? LADDER.btc : LADDER[twinLeg];
+      const aff = ladder.map((fr) => ({ fr, fee: feeFor(twinLeg, "refund", fr, v.feerates, xvb) })).filter(({ fee }) => amt - fee > DUST);
+      const use = aff.length ? aff : [{ fr: ladder[0], fee: feeFor(twinLeg, "refund", ladder[0], v.feerates, xvb) }];
       bundle.twin = { leg: twinLeg, fundLeg: fund, tiers: await Promise.all(use.map(async ({ fr, fee }) => ({ feerate: fr, tx: hex(await this.#buildTwin(v, fund, twinLeg, fee)) }))) };
     }
     // Keep our own copy of the pre-signed recovery ladder BEFORE the POST — the file alone (keys + these

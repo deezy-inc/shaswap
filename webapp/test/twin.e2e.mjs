@@ -12,7 +12,7 @@
 //   Run:  node test/twin.e2e.mjs
 import { randomBytes } from "node:crypto";
 import { bytesToHex as hex, hexToBytes as bin } from "@noble/hashes/utils.js";
-import { btcSpend, addressToScriptPubKey, splitterAddress } from "@qbit-swap/client";
+import { btcSpend, addressToScriptPubKey, splitterAddress, serializeTx } from "@qbit-swap/client";
 import { hasReplayMarker } from "../../coordinator/chains.js";
 import { SwapClient } from "../src/swapflow.js";
 import { installMocks } from "./mockchain.mjs";
@@ -95,6 +95,25 @@ async function main() {
     const sweep = mock.btc.tx.get(swept.twin.qbit.sweepTxid);
     ck(sweep && hasReplayMarker(sweep.vout), "the btc-chain sweep CARRIES the marker (cannot cross back over the fork)");
     ck(hex(sweep.vout[0][1]) === hex(addressToScriptPubKey(B.qbitDest)), "…and pays the fork-side sender's refund address");
+  }
+
+  // ── 2b) the twin chain refuses the cheapest tier → coordinator escalates the ladder ────────────
+  console.log("\n=== scenario 2b: fee-blocked twin sweep escalates instead of deadlocking ===");
+  {
+    const { A, B, id, v0, btcTxid } = await runSwap();
+    mock.qbit.mirrorFrom(mock.btc, btcTxid);
+    const final = await complete(A, B, id);
+    ck(final.state === "COMPLETE", "swap settled with the twin waiting on the fork chain");
+    mock.qbit.minRelay = 3;                     // fork node refuses the bottom tier(s)
+    await until(async () => { const v = await api(`/swaps/${id}`, { token: A.token }); return v.twin?.btc ? v : null; });
+    mock.qbit.mine(v0.locktimes.btc - mock.qbit.height + 1);
+    const swept = await until(async () => { const v = await api(`/swaps/${id}`, { token: A.token }); return v.twin?.btc?.resolved === "swept" ? v : null; }, 300, 400);
+    const sweep = mock.qbit.tx.get(swept.twin.btc.sweepTxid);
+    const paid = v0.terms.btcSats + (v0.fee?.sats || 0) - sweep.vout.reduce((n, [val]) => n + Number(val), 0);
+    const vsize = Math.ceil(serializeTx(sweep).length / 2);   // same rough vsize the mock prices with
+    ck(!!sweep, "sweep broadcast after stepping up the fee ladder (no deadlock at tier 0)");
+    ck(paid / vsize >= mock.qbit.minRelay, `escalated tier cleared the relay floor (${(paid / vsize).toFixed(1)} ≥ ${mock.qbit.minRelay} sat/vB, ${paid} sats)`);
+    mock.qbit.minRelay = 0;
   }
 
   // ── 3) no replay → no twin state ────────────────────────────────────────────────────────────────
